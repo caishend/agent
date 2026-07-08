@@ -1,12 +1,12 @@
 """临时任务文档工具。"""
-from app.agent.tools.base_tool import BaseTool, ToolContext, ToolResult
+from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResult
 
 
 class TaskDraftTool(BaseTool):
     name = "task_draft"
     description = "基于本轮对话整理临时任务文档，等待用户确认哪些信息需要保留。"
 
-    def run(self, query: str, context: ToolContext | None = None) -> ToolResult:
+    def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
         return ToolResult(
             summary=(
                 "【临时任务文档（占位）】\n"

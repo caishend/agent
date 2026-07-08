@@ -1,12 +1,13 @@
 """用户意图识别与工具规划工具。"""
-from app.agent.tools.base_tool import BaseTool, ToolContext, ToolResult
+from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResult
 
 
 class IntentRouterTool(BaseTool):
     name = "intent_router"
     description = "识别用户意图，并给出本轮对话建议调用的工具列表。"
 
-    def run(self, query: str, context: ToolContext | None = None) -> ToolResult:
+    def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
+        query = tool_input.query
         intents: list[str] = []
         tools: list[str] = []
 

@@ -1,12 +1,12 @@
 """多源灾害风险评估工具。"""
-from app.agent.tools.base_tool import BaseTool, ToolContext, ToolResult
+from app.agent.tools.base_tool import BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 
 
 class RiskAssessmentTool(BaseTool):
     name = "risk_assessment"
     description = "融合图谱、浏览器、文档、遥感等证据，生成风险评分、等级、原因和建议。"
 
-    def run(self, query: str, context: ToolContext | None = None) -> ToolResult:
+    def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
         # TODO: 基于 ToolResult evidence 做加权融合
         return ToolResult(
             summary=(
@@ -17,12 +17,12 @@ class RiskAssessmentTool(BaseTool):
                 "建议：启动应急响应，优先核验低洼区域人员与道路通行情况。"
             ),
             evidence=[
-                {
-                    "source": "risk_assessment",
-                    "type": "fusion",
-                    "content": "融合多源证据后得到高风险结论",
-                    "confidence": 0.87,
-                }
+                EvidenceItem(
+                    source="risk_assessment",
+                    type="fusion",
+                    content="融合多源证据后得到高风险结论",
+                    confidence=0.87,
+                )
             ],
             confidence=0.87,
             data={"risk_score": 0.87, "risk_level": "高风险"},
