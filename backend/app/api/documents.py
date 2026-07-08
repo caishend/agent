@@ -25,7 +25,7 @@ async def upload_file(task_id: int, file: UploadFile = File(...),
         f.write(await file.read())
 
     ext = os.path.splitext(file.filename)[1].lower()
-    file_type = {"pdf": "PDF", ".docx": "DOCX", ".txt": "TXT",
+    file_type = {".pdf": "PDF", ".docx": "DOCX", ".txt": "TXT",
                  ".png": "IMAGE", ".jpg": "IMAGE", ".tif": "IMAGE"}.get(ext, "OTHER")
 
     doc = Document(task_id=task_id, filename=file.filename,
@@ -33,4 +33,10 @@ async def upload_file(task_id: int, file: UploadFile = File(...),
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    return {"doc_id": doc.doc_id, "filename": doc.filename, "status": "uploaded"}
+    return {
+        "doc_id": doc.doc_id,
+        "filename": doc.filename,
+        "file_type": doc.file_type,
+        "file_path": doc.file_path,
+        "status": "uploaded",
+    }
