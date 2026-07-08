@@ -1,11 +1,20 @@
 """报告生成工具（占位实现）。"""
-from app.agent.tools.base_tool import BaseTool
+from app.agent.tools.base_tool import BaseTool, ToolContext, ToolResult
 
 
 class ReportTool(BaseTool):
     name = "report"
     description = "将分析结论整合为结构化 PDF 灾害评估报告。"
 
-    def run(self, query: str) -> str:
+    def run(self, query: str, context: ToolContext | None = None) -> ToolResult:
         # TODO: 接入 ReportLab + Jinja2 模板生成 PDF
-        return "【报告生成（占位）】报告已生成，路径：data/reports/task_xxx.pdf"
+        return ToolResult(
+            summary="【报告生成（占位）】报告已生成，路径：data/reports/task_xxx.pdf",
+            artifacts=[
+                {
+                    "type": "report",
+                    "path": "data/reports/task_xxx.pdf",
+                    "format": "pdf",
+                }
+            ],
+        )
