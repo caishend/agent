@@ -1,4 +1,6 @@
 """正式任务记忆写入工具。"""
+from __future__ import annotations
+
 from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResult
 
 

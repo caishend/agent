@@ -1,4 +1,6 @@
 """用户意图识别与工具规划工具。"""
+from __future__ import annotations
+
 from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResult
 
 

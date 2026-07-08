@@ -1,4 +1,6 @@
 """多源灾害风险评估工具。"""
+from __future__ import annotations
+
 from app.agent.tools.base_tool import BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 
 

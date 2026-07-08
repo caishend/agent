@@ -1,4 +1,6 @@
 """文档解析工具（占位实现）。"""
+from __future__ import annotations
+
 from app.agent.tools.base_tool import BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 
 

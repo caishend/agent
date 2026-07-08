@@ -1,4 +1,6 @@
 """Agent 工具基类与统一返回结构。"""
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
