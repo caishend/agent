@@ -1,6 +1,8 @@
 """
 Agent 主入口：接收用户消息，规划任务，调用工具，流式返回结果。
 """
+from __future__ import annotations
+
 from typing import Generator
 from sqlalchemy.orm import Session
 from app.agent.memory import TaskMemory
