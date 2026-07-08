@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # SkyGuard 灾害智能分析 Agent
 
 基于 Graph RAG 与任务记忆增强的多模态遥感灾害智能分析系统。
@@ -44,3 +45,6 @@ docker-compose up -d
 ├── data/         运行时数据（上传文件、报告）
 └── deploy/       Nginx 配置 + MySQL 建表脚本
 ```
+=======
+# agent
+>>>>>>> 9a7a2c565452499d5119a115709d19bf7d5e3349
