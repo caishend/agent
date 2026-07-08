@@ -12,6 +12,9 @@ export const useUserStore = defineStore('user', {
       this.token = res.access_token
       localStorage.setItem('token', res.access_token)
     },
+    async register(data) {
+      return register(data)
+    },
     logout() {
       this.token = ''
       this.userInfo = null

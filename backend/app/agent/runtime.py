@@ -1,8 +1,10 @@
-"""Agent 工具编排运行时。"""
+"""Agent tool orchestration runtime."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
+from app.agent.llm import stream_llm_answer
 from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResult
 from app.agent.tools.browser import BrowserTool
 from app.agent.tools.document import DocumentTool
@@ -17,7 +19,7 @@ from app.agent.tools.task_draft import TaskDraftTool
 
 
 class AgentSessionStore:
-    """MVP 内存会话存储；后续可替换为 task_document / tool_call 表。"""
+    """In-memory session store keyed by task_id."""
 
     def __init__(self):
         self._metadata_by_task: dict[int, dict[str, Any]] = {}
@@ -53,35 +55,101 @@ def run_agent_once(
     files: list[dict[str, Any]] | None = None,
     params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    metadata = session_store.metadata_for(task_id)
-    context = ToolContext(task_id=task_id, user_id=user_id, metadata=metadata)
-    tool_input = ToolInput(query=message, files=files or [], params=params or {})
+    return list(iter_agent_events(task_id, user_id, message, files, params))
 
-    events: list[dict[str, Any]] = [{"type": "thinking", "content": "正在分析用户意图并规划工具调用..."}]
+
+def iter_agent_events(
+    task_id: int,
+    user_id: int,
+    message: str,
+    files: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
+    metadata = session_store.metadata_for(task_id)
+    params = dict(params or {})
+
+    pending_request = metadata.get("pending_report_request")
+    selected_format = _parse_report_format(message)
+    if pending_request and selected_format:
+        params = {
+            **pending_request.get("params", {}),
+            **params,
+            "forced_tool": pending_request.get("forced_tool", "disaster_analysis"),
+            "report_format": selected_format,
+            "format": selected_format,
+            "auto_confirm_memory": True,
+            "capture_screenshot": True,
+        }
+        message = pending_request.get("message") or message
+        metadata.pop("pending_report_request", None)
+
+    forced_tool = str(params.get("forced_tool") or "")
+    needs_report_format = forced_tool in {"disaster_analysis", "task_draft", "report"}
+    if needs_report_format and not (params.get("report_format") or params.get("format")):
+        metadata["pending_report_request"] = {
+            "message": message,
+            "params": params,
+            "forced_tool": forced_tool,
+        }
+        yield {
+            "type": "report_format_required",
+            "content": "生成灾害分析报告前，请选择导出格式：Word 还是 PDF？",
+            "data": {"choices": [{"label": "Word", "format": "docx"}, {"label": "PDF", "format": "pdf"}]},
+        }
+        yield {"type": "answer", "content": "请选择报告格式：**Word** 或 **PDF**。"}
+        yield {"type": "done", "content": "等待报告格式选择", "session": metadata}
+        return
+
+    if needs_report_format:
+        params.setdefault("auto_confirm_memory", True)
+        params.setdefault("capture_screenshot", True)
+        params.setdefault("format", params.get("report_format", "docx"))
+
+    context = ToolContext(task_id=task_id, user_id=user_id, metadata=metadata)
+    tool_input = ToolInput(query=message, files=files or [], params=params)
+
+    if tool_input.params.get("conversation_history"):
+        metadata["conversation_history"] = tool_input.params["conversation_history"]
+    if tool_input.params.get("conversation_record"):
+        metadata["conversation_record"] = tool_input.params["conversation_record"]
+
+    yield {"type": "thinking", "content": "正在识别意图并规划工具调用..."}
     router_result = IntentRouterTool().run(tool_input, context)
-    tools_to_run = router_result.data.get("tools", ["graphrag"])
-    events.append({"type": "intent", "content": router_result.to_text(), "data": router_result.data})
+    tools_to_run = router_result.data.get("tools", [])
+    yield {"type": "intent", "content": router_result.summary, "data": router_result.data}
 
     results: dict[str, ToolResult] = {}
     for tool_name in tools_to_run:
-        events.append({"type": "tool_call", "tool": tool_name, "content": f"调用工具：{tool_name}"})
+        yield {"type": "tool_call", "tool": tool_name, "content": f"正在调用工具：{tool_name}"}
         try:
             result = call_tool(tool_name, tool_input, context)
             results[tool_name] = result
             _update_session_from_result(tool_name, result, metadata)
-            events.append(_tool_result_event(tool_name, result))
+            yield _tool_result_event(tool_name, result)
         except Exception as error:
-            events.append(
-                {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "content": f"工具调用失败：{error}",
-                    "error": str(error),
-                }
-            )
+            yield {
+                "type": "tool_result",
+                "tool": tool_name,
+                "content": f"工具调用失败：{error}",
+                "error": str(error),
+            }
 
-    events.append({"type": "answer", "content": synthesize_answer(message, results)})
-    return events
+    yield {"type": "llm_call", "content": "正在调用 LLM 整合对话记录、相关文档、联网结果与报告产物..."}
+    answer = ""
+    try:
+        for chunk in stream_llm_answer(message, results, metadata):
+            answer += chunk
+            yield {"type": "answer_delta", "content": chunk}
+    except Exception as error:
+        answer = synthesize_answer(message, results, metadata)
+        yield {
+            "type": "llm_fallback",
+            "content": f"LLM 调用失败，已降级为工具摘要：{error}",
+            "error": str(error),
+        }
+
+    yield {"type": "answer", "content": answer}
+    yield {"type": "done", "content": "完成", "session": metadata}
 
 
 def confirm_task_draft(
@@ -108,7 +176,6 @@ def call_tool(tool_name: str, tool_input: ToolInput, context: ToolContext) -> To
     tool = tools.get(tool_name)
     if not tool:
         raise ValueError(f"未知工具：{tool_name}")
-
     prepared_input = _prepare_tool_input(tool_name, tool_input, context.metadata)
     return tool.run(prepared_input, context)
 
@@ -120,12 +187,34 @@ def _prepare_tool_input(
 ) -> ToolInput:
     params = dict(tool_input.params or {})
 
-    if tool_name == "memory" and "draft" not in params and metadata.get("last_draft"):
-        params["draft"] = metadata["last_draft"]
+    if tool_name == "memory":
+        if "draft" not in params and metadata.get("last_draft"):
+            params["draft"] = metadata["last_draft"]
+        if params.get("auto_confirm_memory"):
+            params["confirmed"] = True
     if tool_name == "graphrag" and "documents" not in params and metadata.get("documents"):
         params["documents"] = metadata["documents"]
     if tool_name == "risk_assessment" and "formal_memory" not in params and metadata.get("formal_memory"):
         params["formal_memory"] = metadata["formal_memory"]
+    if tool_name == "report":
+        params.setdefault("format", params.get("report_format", "docx"))
+        if metadata.get("formal_memory") and "task" not in params:
+            params["task"] = metadata["formal_memory"]
+        if metadata.get("risk_assessment") and "risk_assessment" not in params:
+            params["risk_assessment"] = metadata["risk_assessment"]
+        if metadata.get("documents") and "documents" not in params:
+            params["documents"] = metadata["documents"]
+        if metadata.get("evidence") and "evidence" not in params:
+            params["evidence"] = metadata["evidence"]
+        if metadata.get("artifacts") and "artifacts" not in params:
+            params["artifacts"] = metadata["artifacts"]
+        if metadata.get("conversation_record") and "summary" not in params:
+            params["summary"] = metadata["conversation_record"]
+    if tool_name == "email":
+        if metadata.get("last_report_path") and "report_path" not in params:
+            params["report_path"] = metadata["last_report_path"]
+        if metadata.get("last_report_path") and "attachments" not in params:
+            params["attachments"] = [metadata["last_report_path"]]
 
     return ToolInput(query=tool_input.query, files=tool_input.files, params=params)
 
@@ -135,6 +224,10 @@ def _update_session_from_result(
     result: ToolResult,
     metadata: dict[str, Any],
 ) -> None:
+    if result.evidence:
+        metadata.setdefault("evidence", []).extend(item.__dict__ for item in result.evidence)
+    if result.artifacts:
+        metadata.setdefault("artifacts", []).extend(item.__dict__ for item in result.artifacts)
     if tool_name == "task_draft" and result.data.get("draft"):
         metadata["last_draft"] = result.data["draft"]
     if tool_name == "document" and result.data.get("documents"):
@@ -144,6 +237,8 @@ def _update_session_from_result(
         metadata["confirmed_task"] = True
     if tool_name == "risk_assessment" and result.data.get("assessment"):
         metadata["risk_assessment"] = result.data["assessment"]
+    if tool_name == "report" and result.data.get("report_path"):
+        metadata["last_report_path"] = result.data["report_path"]
 
 
 def _tool_result_event(tool_name: str, result: ToolResult) -> dict[str, Any]:
@@ -158,10 +253,36 @@ def _tool_result_event(tool_name: str, result: ToolResult) -> dict[str, Any]:
     }
 
 
-def synthesize_answer(message: str, results: dict[str, ToolResult]) -> str:
+def synthesize_answer(
+    message: str,
+    results: dict[str, ToolResult],
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    history = (metadata or {}).get("conversation_history") or []
     if not results:
-        return f"已收到问题：{message}。当前没有可用工具结果。"
-    lines = [f"针对“{message}”，本轮工具分析结果如下："]
+        remembered_name = _extract_name_from_history(history)
+        if remembered_name and any(word in message for word in ("我是谁", "我叫什么", "我的名字")):
+            return f"你是{remembered_name}。"
+        return "我收到了。当前未调用工具；我会结合本任务内的历史对话继续回答。"
+
+    lines = ["本轮已完成以下工具调用："]
     for tool_name, result in results.items():
-        lines.append(f"【{tool_name}】{result.summary}")
+        lines.append(f"- **{tool_name}**：{result.summary}")
     return "\n".join(lines)
+
+
+def _parse_report_format(message: str) -> str | None:
+    normalized = message.strip().lower()
+    if any(word in normalized for word in ("word", "docx", "文档")):
+        return "docx"
+    if any(word in normalized for word in ("pdf",)):
+        return "pdf"
+    return None
+
+
+def _extract_name_from_history(history: list[dict[str, Any]]) -> str | None:
+    for item in reversed(history):
+        content = str(item.get("content") or "")
+        if "我是" in content:
+            return content.split("我是", 1)[1].strip().split()[0][:20]
+    return None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from app.agent.tools.base_tool import ArtifactItem, BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 
@@ -12,14 +13,20 @@ class BrowserTool(BaseTool):
 
     def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
         query = tool_input.query.strip()
+        search_query = self._prepare_search_query(query)
         params = tool_input.params or {}
-        search_tool = params.get("search_tool")
+        provided_search_tool = params.get("search_tool")
+        search_tool = provided_search_tool or self._default_search_tool()
 
         if search_tool:
-            raw_results = self._search_with_langchain_tool(search_tool, query)
-            search_mode = "langchain_search_tool"
+            try:
+                raw_results = self._search_with_langchain_tool(search_tool, search_query)
+                search_mode = "langchain_search_tool" if provided_search_tool else type(search_tool).__name__
+            except Exception as error:
+                raw_results = self._offline_fallback_results(search_query, error=str(error))
+                search_mode = "offline_fallback"
         else:
-            raw_results = self._offline_fallback_results(query)
+            raw_results = self._offline_fallback_results(search_query)
             search_mode = "offline_fallback"
 
         search_results = self._normalize_search_results(raw_results)
@@ -38,10 +45,30 @@ class BrowserTool(BaseTool):
             confidence=confidence,
             data={
                 "search_mode": search_mode,
+                "query": search_query,
                 "search_results": search_results,
                 "screenshot_observations": screenshot_observations,
             },
         )
+
+    def _default_search_tool(self) -> Any | None:
+        try:
+            from app.agent.tools.adapters.bocha_search import BochaSearchTool
+            from app.config import settings
+        except ImportError:
+            return None
+        if not settings.BOCHA_API_KEY:
+            return None
+        return BochaSearchTool(api_key=settings.BOCHA_API_KEY, api_url=settings.BOCHA_API_URL)
+
+    def _prepare_search_query(self, query: str) -> str:
+        cleaned = query.strip()
+        for phrase in ("帮我搜索一下", "帮我搜索", "搜索一下", "请搜索", "查一下", "帮我查", "查询"):
+            cleaned = cleaned.replace(phrase, " ")
+        cleaned = " ".join(cleaned.split())
+        if cleaned in {"天气", "天气预报"}:
+            cleaned = "当地天气预报"
+        return cleaned or query
 
     def _search_with_langchain_tool(self, search_tool: Any, query: str) -> Any:
         if hasattr(search_tool, "invoke"):
@@ -52,14 +79,11 @@ class BrowserTool(BaseTool):
             return search_tool(query)
         return []
 
-    def _offline_fallback_results(self, query: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "title": "离线检索提示",
-                "url": None,
-                "content": f"未配置实时搜索工具，暂无法联网检索“{query}”。请接入 Tavily、SerpAPI、DuckDuckGo 或 Playwright 搜索后重试。",
-            }
-        ]
+    def _offline_fallback_results(self, query: str, error: str | None = None) -> list[dict[str, Any]]:
+        content = f"未配置实时搜索工具，暂无法联网检索“{query}”。请接入 Bocha、Tavily、SerpAPI、DuckDuckGo 或 Playwright 搜索后重试。"
+        if error:
+            content = f"实时搜索调用失败：{error}。已切换为离线提示，无法联网检索“{query}”。"
+        return [{"title": "离线检索提示", "url": None, "content": content}]
 
     def _normalize_search_results(self, raw_results: Any) -> list[dict[str, Any]]:
         if raw_results is None:
@@ -67,10 +91,7 @@ class BrowserTool(BaseTool):
         if isinstance(raw_results, str):
             return [{"title": "web_search", "url": None, "content": raw_results}]
         if isinstance(raw_results, dict):
-            if "results" in raw_results and isinstance(raw_results["results"], list):
-                raw_items = raw_results["results"]
-            else:
-                raw_items = [raw_results]
+            raw_items = raw_results["results"] if isinstance(raw_results.get("results"), list) else [raw_results]
         else:
             raw_items = list(raw_results)
 
@@ -97,7 +118,18 @@ class BrowserTool(BaseTool):
                     "metadata": {
                         key: value
                         for key, value in item.items()
-                        if key not in {"title", "source", "name", "url", "link", "content", "snippet", "description", "body"}
+                        if key
+                        not in {
+                            "title",
+                            "source",
+                            "name",
+                            "url",
+                            "link",
+                            "content",
+                            "snippet",
+                            "description",
+                            "body",
+                        }
                     },
                 }
             )
@@ -133,7 +165,10 @@ class BrowserTool(BaseTool):
         if not target_url:
             return [], []
 
-        screenshot = self._capture_with_adapter(screenshotter, target_url, query)
+        try:
+            screenshot = self._capture_with_adapter(screenshotter, target_url, query)
+        except Exception as error:
+            return [], [f"网页检索已完成，但截图失败：{type(error).__name__}: {error}"]
         if not screenshot:
             return [], []
 
@@ -167,10 +202,16 @@ class BrowserTool(BaseTool):
         return PlaywrightScreenshotter()
 
     def _first_url(self, search_results: list[dict[str, Any]]) -> str | None:
+        fallback_url = None
         for result in search_results:
-            if result.get("url"):
-                return result["url"]
-        return None
+            url = result.get("url")
+            if not url:
+                continue
+            fallback_url = fallback_url or url
+            hostname = urlparse(url).hostname or ""
+            if "bocha.cn" not in hostname:
+                return url
+        return fallback_url
 
     def _query_mentions_screenshot(self, query: str) -> bool:
         return any(keyword in query for keyword in ("截图", "截屏", "网页图", "页面图"))
@@ -190,7 +231,9 @@ class BrowserTool(BaseTool):
         screenshot_observations: list[str],
     ) -> str:
         if search_mode == "offline_fallback":
-            return search_results[0]["content"] if search_results else f"未配置实时搜索工具，无法检索“{query}”。"
+            return search_results[0]["content"] if search_results else f"无法检索“{query}”。"
+        if not search_results:
+            return f"围绕“{query}”完成网页检索，但没有返回可展示的网页结果。建议补充地点或时间，例如“成都今天暴雨预警”。"
 
         snippets = [
             f"{result['title']}：{result['content']}"
