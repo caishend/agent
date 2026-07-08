@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     REPORT_DIR: str = "data/reports"
 
     # 搜索
+    BOCHA_API_KEY: str = ""
+    BOCHA_API_URL: str = "https://api.bocha.cn/v1/web-search"
     SERP_API_KEY: str = ""
 
     # 邮件 / SMTP

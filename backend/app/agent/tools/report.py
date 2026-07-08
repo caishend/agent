@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,13 @@ class ReportTool(BaseTool):
         payload = self._build_payload(tool_input, context)
         output_path = self._resolve_output_path(params, context)
 
+        report_format = output_path.suffix.lower().lstrip(".") or "pdf"
+
         try:
-            self._write_pdf(output_path, payload)
+            if report_format == "docx":
+                self._write_docx(output_path, payload)
+            else:
+                self._write_pdf(output_path, payload)
         except ImportError as exc:
             return self._failed(
                 "报告生成失败：缺少 reportlab 依赖，请先安装 backend/requirements.txt。",
@@ -31,7 +37,7 @@ class ReportTool(BaseTool):
         except OSError as exc:
             return self._failed(f"报告生成失败：无法写入报告文件：{exc}", "write_failed", error=str(exc))
 
-        artifacts = [ArtifactItem(type="report", path=str(output_path), metadata={"format": "pdf"})]
+        artifacts = [ArtifactItem(type="report", path=str(output_path), metadata={"format": report_format})]
         metadata_path = self._write_metadata(output_path, payload)
         if metadata_path:
             artifacts.append(ArtifactItem(type="report_metadata", path=str(metadata_path), metadata={"format": "json"}))
@@ -61,6 +67,7 @@ class ReportTool(BaseTool):
                 "risk_level": payload["risk_level"],
                 "risk_score": payload.get("risk_score"),
                 "evidence_count": len(payload["evidence"]),
+                "format": report_format,
             },
         )
 
@@ -196,6 +203,96 @@ class ReportTool(BaseTool):
         footer = lambda canvas, doc_: self._footer(canvas, doc_, font_name)
         doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
+    def _write_docx(self, output_path: Path, payload: dict[str, Any]) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        paragraphs = [
+            payload["title"],
+            f"生成时间：{payload['generated_at']}",
+            f"任务 ID：{payload.get('task_id') or '-'}",
+            f"灾害类型：{payload['disaster_type']}",
+            f"目标区域：{payload['location']}",
+            f"综合风险：{self._risk_text(payload)}",
+            "",
+            "1. 摘要",
+            payload["summary"],
+            "",
+            "2. 已确认信息",
+            *self._numbered_lines(payload["known_info"], "暂无已确认信息。"),
+            "",
+            "3. 缺失信息与待核验假设",
+            *self._numbered_lines(payload["missing_info"], "暂无缺失信息。"),
+            "",
+            "4. 综合风险原因",
+            *self._numbered_lines(payload["reasons"], "暂无结构化风险原因。"),
+            "",
+            "5. 应急响应建议",
+            *self._numbered_lines(payload["suggestions"], "暂无建议。"),
+            "",
+            "6. 证据链附录",
+            *self._evidence_lines(payload["evidence"]),
+            "",
+            "7. 图片与文件产物",
+            *self._artifact_lines(payload["artifacts"]),
+            "",
+            "8. 参考资料",
+            *self._numbered_lines(payload["references"], "暂无参考资料。"),
+        ]
+
+        image_paths = self._docx_image_paths(payload["artifacts"])
+        image_relationships = {
+            path: {
+                "rid": f"rIdImage{index}",
+                "target": f"media/image{index}{path.suffix.lower()}",
+            }
+            for index, path in enumerate(image_paths, start=1)
+        }
+        document_xml = self._docx_document_xml(paragraphs, image_relationships)
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="jpg" ContentType="image/jpeg"/>
+  <Default Extension="jpeg" ContentType="image/jpeg"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>""",
+            )
+            archive.writestr(
+                "_rels/.rels",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>""",
+            )
+            archive.writestr("word/document.xml", document_xml)
+            archive.writestr("word/_rels/document.xml.rels", self._docx_relationships_xml(image_relationships))
+            for path, relation in image_relationships.items():
+                archive.writestr(f"word/{relation['target']}", path.read_bytes())
+            archive.writestr(
+                "docProps/core.xml",
+                f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>{self._xml_escape(payload["title"])}</dc:title>
+  <dc:creator>SkyGuard</dc:creator>
+  <cp:lastModifiedBy>SkyGuard Agent</cp:lastModifiedBy>
+</cp:coreProperties>""",
+            )
+            archive.writestr(
+                "docProps/app.xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Application>SkyGuard</Application>
+</Properties>""",
+            )
+
     def _table(self, rows: list[list[Any]], normal: Any, colors: Any) -> list[Any]:
         from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 
@@ -284,16 +381,135 @@ class ReportTool(BaseTool):
         canvas.restoreState()
 
     def _resolve_output_path(self, params: dict[str, Any], context: ToolContext | None) -> Path:
+        report_format = str(params.get("format") or params.get("report_format") or "pdf").lower().lstrip(".")
+        if report_format not in {"pdf", "docx"}:
+            report_format = "pdf"
+
         raw_path = params.get("output_path") or params.get("report_path")
         if raw_path:
             path = Path(str(raw_path)).expanduser()
-            if path.suffix.lower() != ".pdf":
-                path = path.with_suffix(".pdf")
+            if path.suffix.lower() != f".{report_format}":
+                path = path.with_suffix(f".{report_format}")
             return path
 
         task_id = params.get("task_id") or (context.task_id if context else None) or "unknown"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(settings.REPORT_DIR) / f"task_{task_id}_{timestamp}.pdf"
+        return Path(settings.REPORT_DIR) / f"task_{task_id}_{timestamp}.{report_format}"
+
+    def _numbered_lines(self, items: list[Any], empty: str) -> list[str]:
+        if not items:
+            return [empty]
+        return [f"{index}. {item}" for index, item in enumerate(items, start=1)]
+
+    def _evidence_lines(self, evidence: list[dict[str, Any]]) -> list[str]:
+        if not evidence:
+            return ["暂无证据链。"]
+        lines = []
+        for index, item in enumerate(evidence, start=1):
+            source = item.get("source", "-")
+            content = str(item.get("content", "-"))[:500]
+            confidence = self._format_confidence(item.get("confidence"))
+            lines.append(f"{index}. 来源：{source}；置信度：{confidence}；内容：{content}")
+        return lines
+
+    def _artifact_lines(self, artifacts: list[dict[str, Any]]) -> list[str]:
+        if not artifacts:
+            return ["暂无图片、截图或文件产物。"]
+        lines = []
+        for index, item in enumerate(artifacts, start=1):
+            artifact_type = item.get("type", "file")
+            path = item.get("path", "-")
+            description = self._as_dict(item.get("metadata")).get("description") or self._as_dict(item.get("metadata")).get("url") or ""
+            lines.append(f"{index}. 类型：{artifact_type}；路径：{path}{f'；说明：{description}' if description else ''}")
+        return lines
+
+    def _docx_document_xml(self, paragraphs: list[str], image_relationships: dict[Path, dict[str, str]]) -> str:
+        body = "\n".join(self._docx_paragraph(text) for text in paragraphs)
+        if image_relationships:
+            body += "\n" + "\n".join(
+                self._docx_image_paragraph(path, relation["rid"]) for path, relation in image_relationships.items()
+            )
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+  xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    {body}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+
+    def _docx_paragraph(self, text: Any) -> str:
+        return f"<w:p><w:r><w:t xml:space=\"preserve\">{self._xml_escape(text)}</w:t></w:r></w:p>"
+
+    def _docx_image_paragraph(self, path: Path, relationship_id: str) -> str:
+        cx, cy = self._image_size_emu(path)
+        name = self._xml_escape(path.name)
+        return f"""
+<w:p>
+  <w:r>
+    <w:drawing>
+      <wp:inline distT="0" distB="0" distL="0" distR="0">
+        <wp:extent cx="{cx}" cy="{cy}"/>
+        <wp:docPr id="1" name="{name}"/>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic>
+              <pic:nvPicPr><pic:cNvPr id="0" name="{name}"/><pic:cNvPicPr/></pic:nvPicPr>
+              <pic:blipFill><a:blip r:embed="{relationship_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
+            </pic:pic>
+          </a:graphicData>
+        </a:graphic>
+      </wp:inline>
+    </w:drawing>
+  </w:r>
+</w:p>"""
+
+    def _docx_relationships_xml(self, image_relationships: dict[Path, dict[str, str]]) -> str:
+        relationships = "\n".join(
+            f'  <Relationship Id="{relation["rid"]}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{relation["target"]}"/>'
+            for relation in image_relationships.values()
+        )
+        return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{relationships}
+</Relationships>"""
+
+    def _docx_image_paths(self, artifacts: list[dict[str, Any]]) -> list[Path]:
+        paths: list[Path] = []
+        for artifact in artifacts:
+            raw_path = artifact.get("path")
+            if not raw_path:
+                continue
+            path = Path(str(raw_path))
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                continue
+            if path.exists() and path.is_file():
+                paths.append(path)
+        return list(dict.fromkeys(paths))
+
+    def _image_size_emu(self, path: Path) -> tuple[int, int]:
+        max_width_emu = 5_300_000
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                width, height = image.size
+            if width <= 0 or height <= 0:
+                raise ValueError("invalid image size")
+            aspect = height / width
+            return max_width_emu, int(max_width_emu * aspect)
+        except Exception:
+            return max_width_emu, 3_000_000
+
+    def _xml_escape(self, value: Any) -> str:
+        return html.escape(str(value if value is not None else ""), quote=True)
 
     def _write_metadata(self, output_path: Path, payload: dict[str, Any]) -> Path | None:
         metadata_path = output_path.with_suffix(".json")

@@ -8,7 +8,15 @@ const routes = [
   { path: '/tasks/:id', component: () => import('../views/TaskDetail.vue') }
 ]
 
-export default createRouter({
+const router = createRouter({
   history: createWebHistory(),
   routes
 })
+
+router.beforeEach((to) => {
+  const token = localStorage.getItem('token')
+  if (to.path !== '/login' && !token) return '/login'
+  if (to.path === '/login' && token) return '/dashboard'
+})
+
+export default router

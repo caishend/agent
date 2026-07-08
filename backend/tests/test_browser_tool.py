@@ -101,8 +101,34 @@ class BrowserToolTest(unittest.TestCase):
         self.assertEqual(result.artifacts[0].type, "screenshot")
         self.assertEqual(result.artifacts[0].path, "data/screenshots/warning.png")
 
+    def test_screenshot_failure_keeps_search_results(self):
+        class BrokenScreenshotter:
+            def capture(self, url, query=None):
+                raise NotImplementedError()
+
+        result = self.tool.run(
+            ToolInput(
+                query="搜索成都今天暴雨预警并截图",
+                params={
+                    "search_tool": FakeLangChainSearchTool(),
+                    "screenshotter": BrokenScreenshotter(),
+                    "capture_screenshot": True,
+                },
+            ),
+            self.context,
+        )
+
+        self.assertEqual(result.data["search_mode"], "langchain_search_tool")
+        self.assertEqual(len(result.evidence), 2)
+        self.assertEqual(result.artifacts, [])
+        self.assertIn("截图失败", result.data["screenshot_observations"][0])
+
     def test_falls_back_to_offline_search_hint(self):
-        result = self.tool.run(ToolInput(query="搜索北京暴雨预警"), self.context)
+        class BrowserToolWithoutDefaultSearch(BrowserTool):
+            def _default_search_tool(self):
+                return None
+
+        result = BrowserToolWithoutDefaultSearch().run(ToolInput(query="搜索北京暴雨预警"), self.context)
 
         self.assertEqual(result.data["search_mode"], "offline_fallback")
         self.assertGreater(len(result.evidence), 0)
