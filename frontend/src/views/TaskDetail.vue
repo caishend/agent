@@ -383,7 +383,7 @@ async function runAgent() {
       conversation_record: conversationRecord.value,
       ...(currentTool ? { forced_tool: currentTool.value } : {})
     }
-    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments), params }, event => {
+    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments, currentTool), params }, event => {
       handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
@@ -770,9 +770,10 @@ function addArtifactsToRelatedFiles(artifacts = []) {
   }
 }
 
-function currentFilePayload(currentTurnFiles = []) {
+function currentFilePayload(currentTurnFiles = [], currentTool = null) {
   const selectedPaths = new Set(currentTurnFiles.map(file => file.file_path).filter(Boolean))
-  const files = currentTurnFiles.length
+  const onlyCurrentTurn = currentTool?.value === 'remote_sensing'
+  const files = currentTurnFiles.length || onlyCurrentTurn
     ? uploadedFiles.value.filter(file => selectedPaths.has(file.file_path))
     : uploadedFiles.value
   return files.map(file => ({

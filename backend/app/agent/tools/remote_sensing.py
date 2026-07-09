@@ -268,6 +268,8 @@ class RemoteSensingTool(BaseTool):
         for file_info in tool_input.files:
             uploaded_path = file_info.get("path") or file_info.get("file_path")
             uploaded_name = file_info.get("name") or file_info.get("filename") or Path(str(uploaded_path or "")).name
+            if not self._looks_like_image_file(file_info, uploaded_path, uploaded_name):
+                continue
             if uploaded_path and uploaded_name:
                 uploaded_path_by_name[str(uploaded_name).lower()] = str(uploaded_path)
             raw_values.append(uploaded_path)
@@ -295,6 +297,20 @@ class RemoteSensingTool(BaseTool):
             paths.append(path)
 
         return list(dict.fromkeys(paths)), list(dict.fromkeys(invalid))
+
+    def _looks_like_image_file(self, file_info: dict[str, Any], path: Any, name: Any) -> bool:
+        value = " ".join(
+            str(item or "")
+            for item in (
+                file_info.get("type"),
+                file_info.get("file_type"),
+                file_info.get("mime_type"),
+                name,
+                path,
+            )
+        ).lower()
+        suffix = Path(str(name or path or "")).suffix.lower()
+        return value.startswith("image/") or "image" in value or suffix in IMAGE_EXTENSIONS
 
     def _normalize_candidate_path(self, raw_path: str) -> str:
         value = raw_path.strip().strip('"\'`[]()<>')

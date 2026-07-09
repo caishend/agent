@@ -184,7 +184,8 @@ def iter_agent_events(
     yield {"type": "thinking", "content": "正在识别意图并规划工具调用..."}
     router_result = IntentRouterTool().run(tool_input, context)
     tools_to_run = router_result.data.get("tools", [])
-    tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
+    if params.get("forced_tool") != "remote_sensing":
+        tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
     tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
     router_data = dict(router_result.data or {})
     router_data["tools"] = tools_to_run

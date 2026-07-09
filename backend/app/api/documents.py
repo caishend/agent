@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,6 +13,25 @@ from app.utils import get_current_user_id
 from app.config import settings
 
 router = APIRouter()
+
+FILE_TYPE_BY_EXTENSION = {
+    ".pdf": "PDF",
+    ".doc": "DOC",
+    ".docx": "DOCX",
+    ".txt": "TXT",
+    ".md": "MD",
+    ".csv": "CSV",
+    ".xls": "XLS",
+    ".xlsx": "XLSX",
+    ".png": "IMAGE",
+    ".jpg": "IMAGE",
+    ".jpeg": "IMAGE",
+    ".webp": "IMAGE",
+    ".gif": "IMAGE",
+    ".bmp": "IMAGE",
+    ".tif": "IMAGE",
+    ".tiff": "IMAGE",
+}
 
 
 class DeleteDocumentPathIn(BaseModel):
@@ -103,6 +123,7 @@ def _document_payload(doc: Document) -> dict:
         "file_path": doc.file_path,
         "status": "uploaded",
     }
+    return payload
 
 
 @router.delete("/{task_id}/documents/{doc_id}", status_code=204)
