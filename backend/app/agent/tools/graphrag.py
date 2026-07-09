@@ -53,7 +53,16 @@ class GraphRAGTool(BaseTool):
         if documents:
             return self._build_document_result(query, documents, "provided_documents")
 
-        return self._build_builtin_result(query)
+        return ToolResult(
+            summary="当前任务没有可用于 GraphRAG 检索的上传文档。",
+            confidence=0.35,
+            data={
+                "retrieval_mode": "uploaded_documents_only",
+                "documents": [],
+                "reasoning_paths": [],
+                "needs_web_search": True,
+            },
+        )
 
     def _retrieve_with_langchain(self, retriever: Any, query: str) -> list[Any]:
         if hasattr(retriever, "invoke"):
@@ -201,7 +210,7 @@ class GraphRAGTool(BaseTool):
         query: str,
         documents: list[dict[str, Any]],
         *,
-        top_k: int = 6,
+        top_k: int = 4,
     ) -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
         query_terms = self._tokenize(query)
@@ -226,7 +235,7 @@ class GraphRAGTool(BaseTool):
 
         return []
 
-    def _chunk_text(self, text: str, chunk_size: int = 360, overlap: int = 80) -> list[str]:
+    def _chunk_text(self, text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]:
         normalized = re.sub(r"\s+", " ", text or "").strip()
         if not normalized:
             return []

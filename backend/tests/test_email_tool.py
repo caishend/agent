@@ -61,7 +61,7 @@ class EmailToolTest(unittest.TestCase):
             setattr(settings, field, value)
         FakeSMTP.instances.clear()
 
-    def test_missing_recipients_returns_failed_tool_result(self):
+    def test_missing_recipients_asks_user_for_recipient(self):
         self._configure_smtp()
 
         result = EmailTool(smtp_factory=FakeSMTP).run(
@@ -71,6 +71,8 @@ class EmailToolTest(unittest.TestCase):
 
         self.assertEqual(result.data["email_status"], "failed")
         self.assertEqual(result.data["reason"], "missing_recipients")
+        self.assertTrue(result.need_user_confirm)
+        self.assertIn("邮箱", result.summary)
         self.assertEqual(FakeSMTP.instances, [])
 
     def test_missing_smtp_config_returns_failed_tool_result(self):

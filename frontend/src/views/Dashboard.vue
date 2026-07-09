@@ -58,7 +58,7 @@
         </p>
       </div>
 
-      <div class="panel overview-panel" style="grid-column:span 8;">
+      <div class="panel overview-panel" style="grid-column:span 12;">
         <div class="panel-heading">
           <div>
             <div class="eyebrow">Disaster Registry</div>
@@ -106,44 +106,20 @@
             </tbody>
           </table>
         </div>
-      </div>
-
-      <div class="panel overview-panel" style="grid-column:span 4;">
-        <div class="panel-heading">
+        <div class="metric-explain">
           <div>
-            <div class="eyebrow">Population Exposure</div>
-            <h2>本地人口密度数据</h2>
+            <strong>风险</strong>
+            <span>来自灾害分析/任务状态：未完成为“待评估”，完成灾害分析后由 Agent 风险评估写入等级。</span>
           </div>
-        </div>
-        <div v-if="populationDataset.available" class="population-dataset-card">
-          <strong>{{ populationSourceLabel }}</strong>
-          <span v-if="populationDataset.sample_count">已从数据库读取 {{ populationDataset.sample_count }} 个人口密度采样点</span>
-          <span v-else>{{ populationDataset.width }} × {{ populationDataset.height }} pixels</span>
-          <small v-if="populationDataset.path">{{ populationDataset.path }}</small>
-        </div>
-        <div v-else class="population-dataset-card warning">
-          <strong>人口栅格不可用</strong>
-          <span>{{ populationDataset.reason || populationDataset.error || '未找到本地人口 TIF' }}</span>
-        </div>
-        <div v-if="heatmapPointCount" class="density-item heatmap-summary">
           <div>
-            <strong>人口密度像素点</strong>
-            <span>地图中以小点显示，颜色越深人口越密集</span>
+            <strong>人口密度</strong>
+            <span>优先读取数据库人口缓存，按灾害点附近栅格估算平均密度；缓存缺失时回退本地 GeoTIFF。</span>
           </div>
-          <b>{{ heatmapPointCount }}</b>
-        </div>
-        <div v-if="topDensityRows.length" class="density-list">
-          <div v-for="item in topDensityRows" :key="item.population_id" class="density-item">
-            <div>
-              <strong>{{ item.city || item.province }}</strong>
-              <span>{{ item.province }}</span>
-            </div>
-            <b>{{ Math.round(item.density_per_km2) }}</b>
+          <div>
+            <strong>影响人口</strong>
+            <span>按影响半径内暴露人口 × 风险等级权重估算；完成灾害分析后数值会随事件位置、半径和风险等级更新。</span>
           </div>
         </div>
-        <p class="density-hint">
-          风险评估优先读取数据库人口缓存；缓存缺失时才回退到本地 GeoTIFF。
-        </p>
       </div>
     </section>
   </AppShell>
@@ -173,19 +149,6 @@ let graphChart = null
 
 const metrics = computed(() => overview.value.metrics || {})
 const events = computed(() => overview.value.events || [])
-const populationRows = computed(() => overview.value.population_density || [])
-const populationDataset = computed(() => {
-  if (overview.value.population_cache?.available) return overview.value.population_cache
-  if (populationHeatmap.value.dataset?.available) return populationHeatmap.value.dataset
-  return overview.value.population_dataset || {}
-})
-const populationSourceLabel = computed(() => populationDataset.value.sample_count ? '数据库人口密度缓存' : '本地人口栅格数据')
-const topDensityRows = computed(() => {
-  if (populationDataset.value.sample_count) return []
-  return populationRows.value
-    .filter(item => isReadableText(item.city || item.province))
-    .slice(0, 8)
-})
 const selectedEvent = computed(() => {
   return events.value.find(event => {
     if (selectedEventTaskId.value && String(event.task_id) === selectedEventTaskId.value) return true
@@ -197,11 +160,6 @@ const graphStats = computed(() => {
   const graph = overview.value.knowledge_graph || { nodes: [], links: [] }
   return `${graph.nodes?.length || 0} 节点 / ${graph.links?.length || 0} 关系`
 })
-const heatmapPointCount = computed(() => populationHeatmap.value.points?.length || 0)
-
-function isReadableText(value) {
-  return /[\u4e00-\u9fa5A-Za-z]/.test(String(value || '')) && !String(value || '').includes('�')
-}
 
 onMounted(async () => {
   await Promise.all([loadGeoData(), reloadAll()])
@@ -230,7 +188,7 @@ async function reloadAll() {
 }
 
 async function loadOverview(graphTaskId = selectedEventTaskId.value) {
-  overview.value = await getOverviewSummary(graphTaskId ? { graph_task_id: graphTaskId } : {})
+  overview.value = await getOverviewSummary(graphTaskId ? { graph_task_id: graphTaskId, graph_limit: 45 } : { graph_limit: 45 })
   await nextTick()
   renderCharts()
 }
@@ -380,6 +338,9 @@ function renderGraphChart() {
   if (!graphChartRef.value) return
   graphChart ||= echarts.init(graphChartRef.value)
   const graph = overview.value.knowledge_graph || { nodes: [], links: [], categories: [] }
+  const displayNodes = (graph.nodes || []).slice(0, 45)
+  const nodeIds = new Set(displayNodes.map(node => node.id))
+  const displayLinks = (graph.links || []).filter(link => nodeIds.has(link.source) && nodeIds.has(link.target)).slice(0, 80)
 
   graphChart.setOption({
     tooltip: {
@@ -395,11 +356,11 @@ function renderGraphChart() {
         layout: 'force',
         roam: true,
         draggable: true,
-        data: (graph.nodes || []).map(node => ({
+        data: displayNodes.map(node => ({
           ...node,
           symbolSize: node.category === '灾害事件' ? 48 : node.category === '人口影响' ? 38 : 30,
         })),
-        links: (graph.links || []).map(link => ({ ...link, value: link.label || link.value })),
+        links: displayLinks.map(link => ({ ...link, value: link.label || link.value })),
         categories: (graph.categories || []).map(name => ({ name })),
         label: { show: true, color: '#1c2724', fontSize: 11 },
         edgeLabel: { show: true, formatter: '{c}', color: '#7a8581', fontSize: 10 },

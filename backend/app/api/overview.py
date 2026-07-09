@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.agent.tools.base_tool import ToolInput
+from app.agent.tools.document import DocumentTool
 from app.db import get_db
+from app.models.conversation import Document
 from app.models.overview import (
     AdminPopulationStat,
     DisasterEvent,
@@ -18,6 +22,7 @@ from app.models.overview import (
 )
 from app.models.task import Task
 from app.services.graphrag_ingest import build_graph_payload, write_payload_to_neo4j
+from app.config import settings
 from app.services.local_geodata import (
     estimate_population_exposure,
     load_china_province_geojson,
@@ -30,9 +35,13 @@ from app.services.population_cache import (
     heatmap_points_from_db,
     population_cache_status,
 )
+
+GRAPH_DOCUMENT_TYPES = {"PDF", "DOC", "DOCX", "TXT", "MD", "CSV", "XLS", "XLSX"}
 from app.utils import get_current_user_id
 
 router = APIRouter()
+DEFAULT_GRAPH_NODE_LIMIT = 45
+DEFAULT_GRAPH_LINK_LIMIT = 80
 
 
 CITY_PROFILE: dict[str, dict[str, Any]] = {
@@ -87,6 +96,7 @@ RISK_RADIUS = {"低风险": 3, "中风险": 8, "高风险": 15, "极高风险": 
 @router.get("/summary")
 def overview_summary(
     graph_task_id: int | None = Query(default=None),
+    graph_limit: int = Query(default=DEFAULT_GRAPH_NODE_LIMIT, ge=10, le=120),
     user_id: int = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):
@@ -122,7 +132,7 @@ def overview_summary(
         "population_density": [_population_payload(row) for row in population_rows],
         "population_dataset": population_dataset_status(),
         "population_cache": population_cache_status(db),
-        "knowledge_graph": _build_knowledge_graph(db, events, user_id, graph_task_id),
+        "knowledge_graph": _build_knowledge_graph(db, events, user_id, graph_task_id, graph_limit),
         "graph_scope": {"task_id": graph_task_id, "mode": "task" if graph_task_id else "all"},
     }
 
@@ -214,6 +224,8 @@ def _ensure_events_from_tasks(db: Session, user_id: int) -> None:
 def _refresh_population_impact(db: Session, user_id: int) -> None:
     changed = False
     for event in _user_events(db, user_id):
+        if event.estimated_affected_population and event.population_density:
+            continue
         radius = event.impact_radius_km or RISK_RADIUS.get(event.risk_level or "待评估", 5)
         weight = RISK_WEIGHT.get(event.risk_level or "待评估", 0.12)
         raster_result = estimate_population_exposure_from_db(db, event.longitude, event.latitude, radius)
@@ -402,17 +414,16 @@ def _build_knowledge_graph(
     events: list[DisasterEvent],
     user_id: int,
     graph_task_id: int | None,
+    graph_limit: int,
 ) -> dict[str, Any]:
-    kg_graph = _build_persisted_knowledge_graph(db, user_id, graph_task_id)
-    if kg_graph["nodes"] or kg_graph["links"]:
-        return kg_graph
-    return _build_event_fallback_graph(events if graph_task_id is None else [event for event in events if event.task_id == graph_task_id])
+    return _build_persisted_knowledge_graph(db, user_id, graph_task_id, graph_limit)
 
 
-def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: int | None) -> dict[str, Any]:
+def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: int | None, graph_limit: int) -> dict[str, Any]:
     allowed_task_ids = [task.task_id for task in db.query(Task).filter(Task.user_id == user_id).all()]
     if graph_task_id and graph_task_id not in allowed_task_ids:
         return {"categories": [], "nodes": [], "links": []}
+    _ensure_knowledge_graph_from_documents(db, allowed_task_ids, graph_task_id)
 
     entity_query = db.query(KnowledgeGraphEntity)
     relation_query = db.query(KnowledgeGraphRelation)
@@ -426,12 +437,20 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
         return {"categories": [], "nodes": [], "links": []}
 
     nodes = {}
+    node_aliases: dict[tuple[str | None, str, str], tuple[int | None, str]] = {}
     categories = set()
-    for entity in entity_query.order_by(KnowledgeGraphEntity.updated_at.desc()).limit(160).all():
-        node_id = f"kg:{entity.task_id}:{entity.entity_type}:{entity.name}"
+    for entity in entity_query.order_by(KnowledgeGraphEntity.updated_at.desc()).limit(graph_limit).all():
+        canonical_key = (entity.task_id, entity.name)
+        node_aliases[(entity.task_id, entity.name, entity.entity_type)] = canonical_key
         categories.add(entity.entity_type)
-        nodes[(entity.name, entity.entity_type)] = {
-            "id": node_id,
+        if canonical_key in nodes:
+            node = nodes[canonical_key]
+            node["category"] = _merge_graph_category(node["category"], entity.entity_type)
+            node["description"] = node.get("description") or entity.description
+            node["value"] = max(float(node.get("value") or 0.0), float(entity.confidence or 0.7))
+            continue
+        nodes[canonical_key] = {
+            "id": f"kg:{entity.task_id}:{entity.name}",
             "name": entity.name,
             "category": entity.entity_type,
             "value": entity.confidence or 0.7,
@@ -440,12 +459,14 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
         }
 
     links = []
-    for relation in relation_query.order_by(KnowledgeGraphRelation.created_at.desc()).limit(240).all():
-        source_key = (relation.source_name, relation.source_type)
-        target_key = (relation.target_name, relation.target_type)
+    for relation in relation_query.order_by(KnowledgeGraphRelation.created_at.desc()).limit(max(DEFAULT_GRAPH_LINK_LIMIT, graph_limit * 2)).all():
+        source_key = (relation.task_id, relation.source_name)
+        target_key = (relation.task_id, relation.target_name)
+        if len(nodes) >= graph_limit and (source_key not in nodes or target_key not in nodes):
+            continue
         if source_key not in nodes:
             nodes[source_key] = {
-                "id": f"kg:{relation.task_id}:{relation.source_type}:{relation.source_name}",
+                "id": f"kg:{relation.task_id}:{relation.source_name}",
                 "name": relation.source_name,
                 "category": relation.source_type,
                 "value": relation.confidence or 0.7,
@@ -453,12 +474,14 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
             }
         if target_key not in nodes:
             nodes[target_key] = {
-                "id": f"kg:{relation.task_id}:{relation.target_type}:{relation.target_name}",
+                "id": f"kg:{relation.task_id}:{relation.target_name}",
                 "name": relation.target_name,
                 "category": relation.target_type,
                 "value": relation.confidence or 0.7,
                 "task_id": relation.task_id,
             }
+        nodes[source_key]["category"] = _merge_graph_category(nodes[source_key]["category"], relation.source_type)
+        nodes[target_key]["category"] = _merge_graph_category(nodes[target_key]["category"], relation.target_type)
         categories.update([relation.source_type, relation.target_type])
         links.append(
             {
@@ -474,6 +497,75 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
     preferred = ["灾害事件", "灾害类型", "地区", "时间", "风险等级", "风险因素", "影响对象", "基础设施", "证据", "文档", "报告", "处置建议"]
     ordered_categories = [item for item in preferred if item in categories] + sorted(categories - set(preferred))
     return {"categories": ordered_categories, "nodes": list(nodes.values()), "links": links}
+
+
+def _merge_graph_category(current: str | None, candidate: str | None) -> str:
+    priority = {
+        "灾害事件": 100,
+        "灾害类型": 90,
+        "地区": 80,
+        "风险等级": 70,
+        "风险因素": 65,
+        "基础设施": 60,
+        "影响对象": 55,
+        "处置建议": 50,
+        "文档": 40,
+        "证据": 30,
+        "概念": 10,
+    }
+    current = current or "概念"
+    candidate = candidate or "概念"
+    return candidate if priority.get(candidate, 0) > priority.get(current, 0) else current
+
+
+def _ensure_knowledge_graph_from_documents(db: Session, allowed_task_ids: list[int], graph_task_id: int | None) -> None:
+    task_ids = [graph_task_id] if graph_task_id else allowed_task_ids[:3]
+    for task_id in task_ids:
+        if not task_id:
+            continue
+        has_graph = db.query(KnowledgeGraphEntity.entity_id).filter(KnowledgeGraphEntity.task_id == task_id).first()
+        if has_graph:
+            continue
+
+        documents = (
+            db.query(Document)
+            .filter(Document.task_id == task_id)
+            .order_by(Document.upload_time.desc(), Document.doc_id.desc())
+            .all()
+        )
+        documents = [row for row in documents if _is_graph_source_document(row, task_id)][:8]
+        if not documents:
+            continue
+        task = db.query(Task).filter(Task.task_id == task_id).first()
+        if not task:
+            continue
+
+        files = [
+            {"path": row.file_path, "name": row.filename, "filename": row.filename, "type": row.file_type}
+            for row in documents
+            if row.file_path
+        ]
+        if not files:
+            continue
+
+        document_result = DocumentTool().run(
+            tool_input=ToolInput(query=task.task_name or "", files=files, params={}),
+            context=None,
+        )
+        parsed_documents = document_result.data.get("documents") or []
+        if not parsed_documents:
+            continue
+
+        payload = build_graph_payload(
+            task_id=task.task_id,
+            task_name=task.task_name,
+            metadata={"documents": parsed_documents},
+            query=task.task_name or "",
+            use_llm=False,
+        )
+        if payload.get("entities"):
+            _clear_task_knowledge_graph(db, task.task_id)
+            _upsert_knowledge_graph_payload(db, task.task_id, payload)
 
 
 def _build_event_fallback_graph(events: list[DisasterEvent]) -> dict[str, Any]:
@@ -594,20 +686,41 @@ def _sync_evidence_from_metadata(db: Session, event: DisasterEvent, metadata: di
 
 
 def _sync_knowledge_graph_from_metadata(db: Session, task: Task, metadata: dict[str, Any]) -> None:
+    documents = metadata.get("documents") or []
+    if not documents:
+        metadata.pop("knowledge_graph", None)
+        metadata.pop("neo4j_ingest_status", None)
+        _clear_task_knowledge_graph(db, task.task_id)
+        return
+
     payload = metadata.get("knowledge_graph")
     if not isinstance(payload, dict) or not payload.get("entities"):
         payload = build_graph_payload(
             task_id=task.task_id,
             task_name=task.task_name,
-            metadata=metadata,
+            metadata={"documents": documents},
             query=task.task_name,
         )
         metadata["knowledge_graph"] = payload
 
+    _clear_task_knowledge_graph(db, task.task_id)
     _upsert_knowledge_graph_payload(db, task.task_id, payload)
     neo4j_status = metadata.get("neo4j_ingest_status")
     if not neo4j_status:
         metadata["neo4j_ingest_status"] = write_payload_to_neo4j(payload)
+
+
+def _clear_task_knowledge_graph(db: Session, task_id: int) -> None:
+    db.query(KnowledgeGraphRelation).filter(KnowledgeGraphRelation.task_id == task_id).delete(synchronize_session=False)
+    db.query(KnowledgeGraphEntity).filter(KnowledgeGraphEntity.task_id == task_id).delete(synchronize_session=False)
+    db.commit()
+
+
+def _is_graph_source_document(row: Document, task_id: int) -> bool:
+    file_type = str(row.file_type or "").upper()
+    path = str(row.file_path or "").replace("\\", "/").strip()
+    upload_prefix = str(Path(settings.UPLOAD_DIR) / str(task_id)).replace("\\", "/") + "/"
+    return bool(path) and file_type in GRAPH_DOCUMENT_TYPES and path.startswith(upload_prefix) and "/_temp/" not in path
 
 
 def _upsert_knowledge_graph_payload(db: Session, task_id: int, payload: dict[str, Any]) -> None:

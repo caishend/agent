@@ -11,7 +11,6 @@ from app.agent.tools.browser import BrowserTool
 from app.agent.tools.document import DocumentTool
 from app.agent.tools.email import EmailTool
 from app.agent.tools.graphrag import GraphRAGTool
-from app.agent.tools.graphrag_ingest import GraphRAGIngestTool
 from app.agent.tools.intent_router import IntentRouterTool
 from app.agent.tools.memory import MemoryTool
 from app.agent.tools.remote_sensing import RemoteSensingTool
@@ -104,7 +103,6 @@ session_store = AgentSessionStore()
 def tool_registry() -> dict[str, BaseTool]:
     return {
         "graphrag": GraphRAGTool(),
-        "graphrag_ingest": GraphRAGIngestTool(),
         "browser": BrowserTool(),
         "document": DocumentTool(),
         "remote_sensing": RemoteSensingTool(),
@@ -187,6 +185,7 @@ def iter_agent_events(
     if params.get("forced_tool") != "remote_sensing":
         tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
     tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
+    tools_to_run = _remove_runtime_graph_ingest(tools_to_run)
     router_data = dict(router_result.data or {})
     router_data["tools"] = tools_to_run
     yield {"type": "intent", "content": _router_summary(router_data), "data": router_data}
@@ -199,6 +198,10 @@ def iter_agent_events(
             results[tool_name] = result
             _update_session_from_result(tool_name, result, metadata)
             yield _tool_result_event(tool_name, result)
+            if _should_stop_for_user_input(tool_name, result):
+                yield {"type": "answer", "content": result.summary}
+                yield {"type": "done", "content": "等待用户补充信息", "session": metadata}
+                return
         except Exception as error:
             yield {
                 "type": "tool_result",
@@ -286,8 +289,6 @@ def _prepare_tool_input(
             params["confirmed"] = True
     if tool_name == "graphrag" and "documents" not in params and metadata.get("documents"):
         params["documents"] = metadata["documents"]
-    if tool_name == "graphrag_ingest":
-        params.setdefault("ingest_scope", "task")
     if tool_name == "risk_assessment" and "formal_memory" not in params and metadata.get("formal_memory"):
         params["formal_memory"] = metadata["formal_memory"]
     if tool_name == "report":
@@ -351,6 +352,10 @@ def _sanitize_tools_for_request(tools: list[str], query: str) -> list[str]:
     return tools
 
 
+def _remove_runtime_graph_ingest(tools: list[str]) -> list[str]:
+    return [tool for tool in tools if tool != "graphrag_ingest"]
+
+
 def _router_summary(router_data: dict[str, Any]) -> str:
     tools = router_data.get("tools") or []
     return (
@@ -377,6 +382,12 @@ def _needs_web_search_fallback(results: dict[str, ToolResult]) -> bool:
     return bool(graphrag_result.data.get("needs_web_search"))
 
 
+def _should_stop_for_user_input(tool_name: str, result: ToolResult) -> bool:
+    if tool_name != "email":
+        return False
+    return bool(result.need_user_confirm or result.data.get("reason") in {"missing_recipients", "invalid_recipients"})
+
+
 def _update_session_from_result(
     tool_name: str,
     result: ToolResult,
@@ -395,13 +406,6 @@ def _update_session_from_result(
         metadata["confirmed_task"] = True
     if tool_name == "risk_assessment" and result.data.get("assessment"):
         metadata["risk_assessment"] = result.data["assessment"]
-    if tool_name == "graphrag_ingest" and result.data.get("entities"):
-        metadata["knowledge_graph"] = {
-            "task_id": result.data.get("task_id"),
-            "entities": result.data.get("entities", []),
-            "relations": result.data.get("relations", []),
-        }
-        metadata["neo4j_ingest_status"] = result.data.get("neo4j", {})
     if tool_name == "report" and result.data.get("report_path"):
         metadata["last_report_path"] = result.data["report_path"]
 

@@ -1,4 +1,4 @@
-"""邮件通知工具。"""
+"""Email notification tool."""
 from __future__ import annotations
 
 import mimetypes
@@ -23,7 +23,7 @@ EMAIL_PATTERN = re.compile(
 
 class EmailTool(BaseTool):
     name = "email"
-    description = "将生成的报告或预警结论通过 SMTP 发送到指定邮箱。"
+    description = "通过 SMTP 将报告、预警结论或通知发送到指定邮箱。"
 
     def __init__(
         self,
@@ -42,13 +42,16 @@ class EmailTool(BaseTool):
         invalid_all = invalid_recipients + invalid_cc + invalid_bcc
 
         if invalid_all:
-            return self._failed(
-                "邮件发送失败：存在格式不合法的邮箱地址。",
+            return self._needs_user_input(
+                "邮件发送失败：存在格式不合法的邮箱地址，请重新提供有效收件人邮箱。",
                 "invalid_recipients",
                 invalid_recipients=invalid_all,
             )
         if not recipients:
-            return self._failed("邮件发送失败：缺少有效收件人。", "missing_recipients")
+            return self._needs_user_input(
+                "发送邮件需要收件人邮箱地址。请告诉我收件人邮箱，例如：发送给 ops@example.com。",
+                "missing_recipients",
+            )
 
         missing_config = self._missing_smtp_config()
         if missing_config:
@@ -96,7 +99,7 @@ class EmailTool(BaseTool):
                 EvidenceItem(
                     source="email",
                     type="notification",
-                    content=f"邮件主题「{subject}」已发送，收件人：{recipient_text}",
+                    content=f"邮件主题《{subject}》已发送，收件人：{recipient_text}",
                     confidence=1.0,
                 )
             ],
@@ -243,6 +246,14 @@ class EmailTool(BaseTool):
     def _clean_header(self, value: Any) -> str:
         text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
         return text or "SkyGuard 灾害分析通知"
+
+    def _needs_user_input(self, summary: str, reason: str, **extra: Any) -> ToolResult:
+        return ToolResult(
+            summary=summary,
+            confidence=0.0,
+            need_user_confirm=True,
+            data={"email_status": "failed", "reason": reason, **extra},
+        )
 
     def _failed(self, summary: str, reason: str, **extra: Any) -> ToolResult:
         return ToolResult(

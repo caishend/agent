@@ -24,7 +24,7 @@ class BochaSearchTool:
             "query": query,
             "freshness": kwargs.get("freshness", "noLimit"),
             "summary": kwargs.get("summary", True),
-            "count": kwargs.get("count", 10),
+            "count": kwargs.get("count", 5),
         }
         if kwargs.get("include"):
             payload["include"] = kwargs["include"]

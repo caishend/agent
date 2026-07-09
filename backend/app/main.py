@@ -3,8 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+import threading
 
 from app.api import agent, auth, chat, documents, overview, tasks
+from app.config import settings
 from app.db import Base, engine
 import app.models  # noqa: F401
 
@@ -56,3 +58,26 @@ app.include_router(overview.router, prefix="/api/overview", tags=["Overview"])
 @app.get("/")
 def root():
     return {"message": "SkyGuard API is running"}
+
+
+@app.on_event("startup")
+def warm_disaster_model() -> None:
+    if not settings.DISASTER_MODEL_ENABLED or not settings.DISASTER_MODEL_WARMUP:
+        return
+    thread = threading.Thread(target=_warm_disaster_model_worker, daemon=True, name="disaster-model-warmup")
+    thread.start()
+
+
+def _warm_disaster_model_worker() -> None:
+    try:
+        from app.agent.tools.disaster_detector import DisasterPipelineDetector
+
+        detector = DisasterPipelineDetector(
+            model_dir=settings.DISASTER_MODEL_DIR,
+            device=settings.DISASTER_MODEL_DEVICE,
+            gate_threshold=settings.DISASTER_GATE_THRESHOLD,
+        )
+        detector.preload()
+        print("[SkyGuard] disaster model warmed and cached.")
+    except Exception as error:
+        print(f"[SkyGuard] disaster model warmup skipped: {error}")

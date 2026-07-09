@@ -34,9 +34,10 @@ def build_graph_payload(
     task_name: str | None,
     metadata: dict[str, Any],
     query: str = "",
+    use_llm: bool = True,
 ) -> dict[str, Any]:
     source_payload = _source_payload(task_id=task_id, task_name=task_name, metadata=metadata, query=query)
-    if is_llm_configured():
+    if use_llm and is_llm_configured():
         try:
             return _normalize_payload(_extract_with_llm(source_payload), source_payload)
         except Exception:
@@ -112,6 +113,39 @@ def write_payload_to_neo4j(payload: dict[str, Any]) -> dict[str, Any]:
             driver.close()
 
 
+def clear_task_graph_from_neo4j(task_id: int | None) -> dict[str, Any]:
+    if task_id is None:
+        return {"enabled": False, "status": "skipped", "reason": "task_id 为空"}
+    if not (settings.NEO4J_URI and settings.NEO4J_USER and settings.NEO4J_PASSWORD):
+        return {"enabled": False, "status": "skipped", "reason": "Neo4j 未配置"}
+
+    try:
+        from neo4j import GraphDatabase
+    except ImportError as error:
+        return {"enabled": False, "status": "failed", "reason": f"neo4j 依赖未安装：{error}"}
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(
+            settings.NEO4J_URI,
+            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+        )
+        with driver.session() as session:
+            session.run(
+                """
+                MATCH (n:SkyGuardEntity {task_id: $task_id})
+                DETACH DELETE n
+                """,
+                task_id=task_id,
+            )
+        return {"enabled": True, "status": "completed"}
+    except Exception as error:
+        return {"enabled": True, "status": "failed", "reason": str(error)}
+    finally:
+        if driver:
+            driver.close()
+
+
 def _source_payload(
     *,
     task_id: int | None,
@@ -120,10 +154,8 @@ def _source_payload(
     query: str,
 ) -> dict[str, Any]:
     documents = _as_list(metadata.get("documents"))[:16]
-    conversation_record = str(metadata.get("conversation_record") or "")
 
-    text_blocks = [task_name or "", conversation_record]
-    text_blocks.extend(str(item.get("content") or "") for item in documents if isinstance(item, dict))
+    text_blocks = [str(item.get("content") or "") for item in documents if isinstance(item, dict)]
 
     return {
         "task_id": task_id,
@@ -134,7 +166,7 @@ def _source_payload(
         "documents": documents,
         "evidence": [],
         "artifacts": [],
-        "conversation_record": conversation_record,
+        "conversation_record": "",
         "text": "\n".join(block for block in text_blocks if block)[:30000],
     }
 

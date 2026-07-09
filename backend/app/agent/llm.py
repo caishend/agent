@@ -155,9 +155,9 @@ def _answer_user_prompt(
 ) -> str:
     payload = {
         "user_question": message,
-        "conversation_history": metadata.get("conversation_history", []),
+        "conversation_history": _compact_conversation_history(metadata.get("conversation_history", [])),
         "tool_results": {
-            name: result.to_dict()
+            name: _compact_tool_result(name, result)
             for name, result in results.items()
         },
         "session_memory": {
@@ -182,11 +182,122 @@ def _answer_user_prompt(
     )
 
 
-def _safe_json(payload: dict[str, Any], limit: int = 24000) -> str:
+def _compact_conversation_history(history: Any, *, max_items: int = 8, content_limit: int = 500) -> list[dict[str, Any]]:
+    if not isinstance(history, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in history[-max_items:]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "role": item.get("role"),
+                "content": _shorten_text(item.get("content"), content_limit),
+                "created_at": item.get("created_at"),
+            }
+        )
+    return compact
+
+
+def _compact_tool_result(name: str, result: ToolResult) -> dict[str, Any]:
+    evidence_limit = 5 if name == "browser" else 6
+    content_limit = 360 if name == "browser" else 520
+    compact = {
+        "summary": _shorten_text(result.summary, 1200),
+        "need_user_confirm": result.need_user_confirm,
+        "evidence": [
+            {
+                "source": item.source,
+                "type": item.type,
+                "content": _shorten_text(item.content, content_limit),
+                "metadata": _compact_metadata(item.metadata),
+            }
+            for item in result.evidence[:evidence_limit]
+        ],
+        "artifacts": [
+            {
+                "type": item.type,
+                "path": item.path,
+                "metadata": _compact_metadata(item.metadata),
+            }
+            for item in result.artifacts[:8]
+        ],
+    }
+    tool_data = _compact_tool_data(name, result.data)
+    if tool_data:
+        compact["data"] = tool_data
+    return compact
+
+
+def _compact_tool_data(name: str, data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    if name == "browser":
+        return {
+            key: value
+            for key, value in {
+                "search_mode": data.get("search_mode"),
+                "query": data.get("query"),
+                "screenshot_observations": [
+                    _shorten_text(item, 220)
+                    for item in (data.get("screenshot_observations") or [])[:5]
+                ],
+            }.items()
+            if value
+        }
+    if name == "document":
+        return {
+            key: value
+            for key, value in {
+                "document_mode": data.get("document_mode"),
+                "key_points": [_shorten_text(item, 260) for item in (data.get("key_points") or [])[:8]],
+                "graph_rag_ready": data.get("graph_rag_ready"),
+            }.items()
+            if value not in (None, [], "")
+        }
+    if name == "graphrag":
+        return {
+            key: value
+            for key, value in {
+                "retrieval_mode": data.get("retrieval_mode"),
+                "needs_web_search": data.get("needs_web_search"),
+                "reasoning_paths": [
+                    _shorten_text(item, 320)
+                    for item in (data.get("reasoning_paths") or [])[:6]
+                ],
+            }.items()
+            if value not in (None, [], "")
+        }
+    return {
+        key: _shorten_text(value, 800) if isinstance(value, str) else value
+        for key, value in data.items()
+        if key not in {"documents", "search_results", "raw", "raw_results", "pages"}
+    }
+
+
+def _compact_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    allowed_keys = ("url", "source", "path", "site_name", "date_published", "chunk_index", "rag_score")
+    return {
+        key: _shorten_text(value, 220) if isinstance(value, str) else value
+        for key, value in metadata.items()
+        if key in allowed_keys and value not in (None, "")
+    }
+
+
+def _safe_json(payload: dict[str, Any], limit: int = 14000) -> str:
     text = json.dumps(payload, ensure_ascii=False, default=str, indent=2)
     if len(text) <= limit:
         return text
     return text[:limit] + "\n...（上下文过长，已截断）"
+
+
+def _shorten_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -220,7 +221,19 @@ class RemoteSensingTool(BaseTool):
             gate_threshold=threshold,
         )
         try:
-            result = detector.analyze(image_path, processed_dir)
+            timeout_seconds = self._positive_float(
+                params.get("disaster_model_timeout"),
+                default=settings.DISASTER_MODEL_TIMEOUT_SECONDS,
+            )
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(detector.analyze, image_path, processed_dir)
+            try:
+                result = future.result(timeout=timeout_seconds)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        except TimeoutError:
+            params["_disaster_model_error"] = f"model inference timed out after {timeout_seconds:.0f}s"
+            return None
         except DisasterModelUnavailable as exc:
             params["_disaster_model_error"] = str(exc)
             return None

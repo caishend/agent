@@ -301,6 +301,9 @@ class DisasterPipelineDetector:
             "visualizations": visual_paths,
         }
 
+    def preload(self) -> None:
+        self._pipeline()
+
     def _pipeline(self) -> Any:
         key = (str(self.model_dir), self.device, self.gate_threshold)
         if key in self._load_errors:

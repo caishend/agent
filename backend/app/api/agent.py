@@ -16,9 +16,12 @@ from app.api.overview import sync_event_from_agent_session
 from app.db import SessionLocal, get_db
 from app.models.conversation import Conversation, Document
 from app.models.task import Task
+from app.config import settings
 from app.utils import get_current_user_id
 
 router = APIRouter()
+
+GRAPH_DOCUMENT_TYPES = {"PDF", "DOC", "DOCX", "TXT", "MD", "CSV", "XLS", "XLSX"}
 
 
 class AgentMessageIn(BaseModel):
@@ -51,7 +54,8 @@ def run_agent_message(
 ):
     _get_task_or_404(task_id, user_id, db)
     files = _with_uploaded_documents(db, task_id, data.files)
-    _save_message(db, task_id, "user", data.message)
+    _sync_session_documents_from_files(task_id, files)
+    _save_message(db, task_id, "user", _message_with_file_manifest(data.message, data.files))
     params = _with_conversation_history(db, task_id, data.params)
     events = run_agent_once(
         task_id=task_id,
@@ -81,7 +85,7 @@ def stream_agent_message(
 ):
     _get_task_or_404(task_id, user_id, db)
     files = _with_uploaded_documents(db, task_id, data.files)
-    _save_message(db, task_id, "user", data.message)
+    _save_message(db, task_id, "user", _message_with_file_manifest(data.message, data.files))
     params = _with_conversation_history(db, task_id, data.params)
     assistant_conv_id = _save_message(db, task_id, "assistant", "正在生成回复...")
 
@@ -103,7 +107,9 @@ def stream_agent_message(
                 last_persisted_length = len(content)
 
         try:
-            yield ": connected\r\n\r\n"
+            yield _sse_comment("connected")
+            yield _sse_data({"type": "thinking", "content": "正在准备上传文档与会话上下文..."})
+            _sync_session_documents_from_files(task_id, files)
             for event in iter_agent_events(
                 task_id=task_id,
                 user_id=user_id,
@@ -112,21 +118,30 @@ def stream_agent_message(
                 params=params,
             ):
                 _append_trace_event(trace, event)
-                _update_tool_record(db, trace_row, trace)
                 if event.get("type") == "answer_delta":
                     answer_chunks.append(str(event.get("content") or ""))
-                    persist(current_answer())
                 if event.get("type") == "answer":
                     answer = str(event.get("content") or "")
                     if answer:
-                        _update_message_in_new_session(assistant_conv_id, answer)
                         last_persisted_length = len(answer)
                         answer_saved = True
                 if event.get("type") == "done":
                     done_sent = True
                 if event.get("type") == "tool_result" and event.get("tool") == "report":
-                    _register_report_artifacts(db, task_id, event.get("artifacts") or [])
+                    report_artifacts = event.get("artifacts") or []
+                else:
+                    report_artifacts = []
                 yield _sse_data(event)
+                if event.get("type") in {"llm_call", "tool_call", "tool_result", "intent", "error"}:
+                    _update_tool_record(db, trace_row, trace)
+                if event.get("type") == "answer_delta":
+                    persist(current_answer())
+                if event.get("type") == "answer":
+                    answer = str(event.get("content") or "")
+                    if answer:
+                        _update_message_in_new_session(assistant_conv_id, answer)
+                if report_artifacts:
+                    _register_report_artifacts(db, task_id, report_artifacts)
             if not done_sent:
                 yield _sse_data({"type": "done", "content": "完成", "session": session_store.metadata_for(task_id)})
             final_answer = current_answer()
@@ -264,19 +279,7 @@ def _update_message_in_new_session(conv_id: int, content: str) -> None:
 
 
 def _register_report_artifacts(db: Session, task_id: int, artifacts: list[dict[str, Any]]) -> None:
-    for artifact in artifacts:
-        if artifact.get("type") != "report":
-            continue
-        path = str(artifact.get("path") or "")
-        if not path:
-            continue
-        filename = Path(path).name
-        file_type = Path(path).suffix.lower().lstrip(".").upper() or "REPORT"
-        exists = db.query(Document).filter(Document.task_id == task_id, Document.file_path == path).first()
-        if exists:
-            continue
-        db.add(Document(task_id=task_id, filename=filename, file_type=file_type, file_path=path))
-    db.commit()
+    return
 
 
 def _create_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> Conversation:
@@ -409,6 +412,8 @@ def _with_uploaded_documents(db: Session, task_id: int, files: list[dict[str, An
     seen_paths = {str(item.get("path") or item.get("file_path") or "") for item in merged}
     rows = db.query(Document).filter(Document.task_id == task_id).order_by(Document.upload_time.desc()).all()
     for row in rows:
+        if not _is_graph_source_document(row, task_id):
+            continue
         if row.file_path in seen_paths:
             continue
         merged.append(
@@ -423,6 +428,68 @@ def _with_uploaded_documents(db: Session, task_id: int, files: list[dict[str, An
     return merged
 
 
+def _message_with_file_manifest(message: str, files: list[dict[str, Any]]) -> str:
+    if not files:
+        return message
+    manifest = [
+        {
+            "filename": item.get("filename") or item.get("name"),
+            "file_type": item.get("file_type") or item.get("type"),
+            "file_path": item.get("file_path") or item.get("path"),
+            "mime_type": item.get("mime_type"),
+        }
+        for item in files
+        if item.get("file_path") or item.get("path")
+    ]
+    if not manifest:
+        return message
+    return f"{message}\n\n<!-- skyguard_attachments:{json.dumps(manifest, ensure_ascii=False, default=str)} -->"
+
+
+def _sync_session_documents_from_files(task_id: int, files: list[dict[str, Any]]) -> None:
+    metadata = session_store.metadata_for(task_id)
+    document_files = [
+        file
+        for file in files
+        if _is_graph_source_file(file, task_id)
+    ]
+    if not document_files:
+        metadata.pop("documents", None)
+        metadata.pop("documents_signature", None)
+        return
+
+    signature = [
+        str(file.get("path") or file.get("file_path") or "")
+        for file in document_files
+        if file.get("path") or file.get("file_path")
+    ]
+    if metadata.get("documents_signature") == signature and metadata.get("documents"):
+        return
+
+    from app.agent.tools.document import DocumentTool
+
+    result = DocumentTool().run(
+        ToolInput(query="", files=document_files, params={}),
+        context=None,
+    )
+    metadata["documents"] = result.data.get("documents") or []
+    metadata["documents_signature"] = signature
+
+
+def _is_graph_source_document(row: Document, task_id: int) -> bool:
+    return _is_graph_source_file(
+        {"path": row.file_path, "file_path": row.file_path, "type": row.file_type, "file_type": row.file_type},
+        task_id,
+    )
+
+
+def _is_graph_source_file(file: dict[str, Any], task_id: int) -> bool:
+    file_type = str(file.get("type") or file.get("file_type") or "").upper()
+    path = str(file.get("path") or file.get("file_path") or "").replace("\\", "/").strip()
+    upload_prefix = str(Path(settings.UPLOAD_DIR) / str(task_id)).replace("\\", "/") + "/"
+    return bool(path) and file_type in GRAPH_DOCUMENT_TYPES and path.startswith(upload_prefix) and "/_temp/" not in path
+
+
 def _last_answer(events: list[dict[str, Any]]) -> str:
     for event in reversed(events):
         if event.get("type") == "answer":
@@ -431,7 +498,11 @@ def _last_answer(events: list[dict[str, Any]]) -> str:
 
 
 def _sse_data(payload: dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\r\n\r\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+def _sse_comment(message: str) -> str:
+    return f": {message} {' ' * 2048}\n\n"
 
 
 def _new_trace_record(message: str) -> dict[str, Any]:

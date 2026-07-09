@@ -427,6 +427,65 @@ textarea { resize: none; }
   background: #fff;
 }
 
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.message-attachment {
+  max-width: min(360px, 100%);
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: inherit;
+  background: #f8faf9;
+  text-decoration: none;
+}
+
+.message-attachment img {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  max-width: 44px !important;
+  max-height: 44px !important;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+}
+
+.message-attachment strong,
+.message-attachment small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.attachment-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .markdown-body blockquote {
   margin: 10px 0;
   padding: 8px 12px;
@@ -1122,8 +1181,84 @@ textarea { resize: none; }
   line-height: 1.5;
 }
 
+.composer-files {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 92px;
+  overflow: auto;
+  padding: 0 4px 2px;
+}
+
+.composer-file-chip {
+  max-width: min(360px, 100%);
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f8faf9;
+}
+
+.composer-file-chip img {
+  width: 44px;
+  height: 44px;
+  max-width: 44px;
+  max-height: 44px;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+}
+
+.composer-file-chip > span {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.composer-file-chip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.composer-file-chip button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.composer-file-chip button:hover {
+  color: #8f4f37;
+  background: #fff0eb;
+}
+
 .tool-picker {
   position: relative;
+}
+
+.hidden-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
 }
 
 .attach-button.active {
@@ -1536,6 +1671,33 @@ textarea { resize: none; }
 .overview-table a {
   color: var(--accent);
   font-weight: 800;
+}
+
+.metric-explain {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.metric-explain > div {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.metric-explain strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.metric-explain span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .empty-cell {

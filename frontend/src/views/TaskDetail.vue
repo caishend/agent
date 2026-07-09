@@ -90,11 +90,6 @@
               </div>
             </details>
 
-            <details v-if="item.data" class="json-details">
-              <summary>查看结构化数据</summary>
-              <pre class="json-block">{{ pretty(item.data) }}</pre>
-            </details>
-
             <div v-if="item.needConfirm" class="confirm-box">
               <span>这些信息是否需要保留到正式任务记忆？</span>
               <button class="solid-button inline" @click="confirmDraftFromMessage(item)">确认保留</button>
@@ -140,7 +135,14 @@
                 <strong>{{ file.filename }}</strong>
                 <small>{{ file.file_type }} · 点击预览/下载</small>
               </a>
-              <button class="doc-delete-button" type="button" @click="removeDocument(file)">删除</button>
+              <button
+                class="doc-delete-button"
+                type="button"
+                :disabled="deletingDocumentKey === documentKey(file)"
+                @click.stop.prevent="removeDocument(file)"
+              >
+                {{ deletingDocumentKey === documentKey(file) ? '删除中' : '删除' }}
+              </button>
             </div>
           </div>
         </section>
@@ -161,7 +163,14 @@
         </div>
 
         <div class="tool-picker">
-          <input ref="composerFileInput" class="hidden-file-input" type="file" multiple @change="attachFromComposer" />
+          <input
+            ref="composerFileInput"
+            class="hidden-file-input"
+            type="file"
+            multiple
+            :accept="selectedTool?.value === 'remote_sensing' ? 'image/*,.tif,.tiff' : undefined"
+            @change="attachFromComposer"
+          />
           <button
             type="button"
             class="attach-button"
@@ -207,6 +216,7 @@ import AppShell from '../components/AppShell.vue'
 import {
   clearAgentSession,
   confirmDraft,
+  deleteTaskArtifact,
   deleteTaskDocument,
   deleteTaskDocumentByPath,
   getAgentSession,
@@ -215,7 +225,8 @@ import {
   getTask,
   saveAgentRecord,
   streamAgentMessage,
-  uploadFile
+  uploadFile,
+  uploadTempFile
 } from '../api/task'
 
 marked.setOptions({ breaks: true, gfm: true })
@@ -238,7 +249,10 @@ const selectedTool = ref(null)
 const toolMenuOpen = ref(false)
 const conversationRecord = ref('')
 const recordSavedAt = ref('')
+const deletingDocumentKey = ref('')
+const removedRelatedFilePaths = ref(new Set())
 const typingState = new Map()
+let streamFallbackTimer = null
 
 const toolOptions = [
   { value: 'browser', icon: '🌐', label: '网页搜索', desc: '搜索网页并可用浏览器截图', placeholder: '搜索成都暴雨最新预警并截图' },
@@ -258,6 +272,7 @@ async function loadTaskState() {
   messages.value = []
   uploadedFiles.value = []
   pendingFiles.value = []
+  removedRelatedFilePaths.value = new Set()
   selectedTool.value = null
   toolMenuOpen.value = false
   await refreshSession()
@@ -268,7 +283,10 @@ async function loadTaskState() {
 }
 
 async function loadUploadedDocuments() {
-  uploadedFiles.value = await getTaskDocuments(taskId.value)
+  const documents = await getTaskDocuments(taskId.value)
+  uploadedFiles.value = documents
+    .map(normalizeRelatedFile)
+    .filter(file => !removedRelatedFilePaths.value.has(normalizeFilePath(file.file_path)))
 }
 
 async function loadChatHistory() {
@@ -279,12 +297,15 @@ async function loadChatHistory() {
   for (const item of history) {
     if (item.role === 'tool') {
       const parsedTrace = parseTraceRecord(item.content)
-      if (parsedTrace) pendingTrace = parsedTrace
+      if (parsedTrace) {
+        const attached = attachTraceToPreviousAgent(restored, parsedTrace)
+        if (!attached) pendingTrace = parsedTrace
+      }
       continue
     }
 
     if (item.role === 'assistant') {
-      restored.push({
+      const agentMessage = {
         id: `db-${item.conv_id}`,
         role: 'agent',
         title: 'Agent',
@@ -295,7 +316,8 @@ async function loadChatHistory() {
         artifacts: pendingTrace?.artifacts || [],
         data: pendingTrace?.data,
         traceOpen: false
-      })
+      }
+      restored.push(agentMessage)
       pendingTrace = null
       continue
     }
@@ -304,28 +326,30 @@ async function loadChatHistory() {
       id: `db-${item.conv_id}`,
       role: 'user',
       title: '用户',
-      content: item.content
-    })
-  }
-
-  if (pendingTrace) {
-    restored.push({
-      id: `trace-${crypto.randomUUID()}`,
-      role: 'agent',
-      title: 'Agent · 执行轨迹',
-      content: '本轮执行轨迹已恢复；如果没有最终回答，可能是页面刷新或请求中断导致。',
-      requestText: pendingTrace.requestText,
-      progress: pendingTrace.progress || [],
-      searchResults: pendingTrace.searchResults || [],
-      artifacts: pendingTrace.artifacts || [],
-      data: pendingTrace.data,
-      traceOpen: true
+      content: stripAttachmentManifest(item.content),
+      attachments: attachmentsFromMessageContent(item.content)
     })
   }
 
   messages.value = restored
   syncArtifactsToRelatedFiles(restored)
   await scrollToBottom()
+}
+
+function attachTraceToPreviousAgent(items, trace) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.role === 'user') return false
+    if (item.role !== 'agent') continue
+    item.requestText = item.requestText || trace.requestText
+    item.progress = trace.progress || []
+    item.searchResults = trace.searchResults || []
+    item.artifacts = trace.artifacts || []
+    item.data = trace.data
+    item.traceOpen = false
+    return true
+  }
+  return false
 }
 
 function parseTraceRecord(content) {
@@ -342,6 +366,81 @@ function parseTraceRecord(content) {
   } catch {
     return null
   }
+}
+
+function attachmentsFromMessageContent(content) {
+  const manifest = attachmentManifestFromContent(content)
+  if (manifest.length) return manifest.map(normalizeRelatedFile)
+  return []
+}
+
+function attachmentManifestFromContent(content) {
+  const match = String(content || '').match(/<!--\s*skyguard_attachments:(.*?)\s*-->/s)
+  if (!match) return []
+  try {
+    const parsed = JSON.parse(match[1])
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function stripAttachmentManifest(content) {
+  return String(content || '').replace(/\n*\s*<!--\s*skyguard_attachments:.*?-->\s*/s, '').trim()
+}
+
+function startStreamFallbackPolling(progressMessage) {
+  stopStreamFallbackPolling()
+  streamFallbackTimer = window.setInterval(async () => {
+    if (!loading.value) return
+    try {
+      await refreshRunningMessageFromHistory(progressMessage)
+    } catch {
+      // 流式兜底不能影响主请求
+    }
+  }, 1200)
+}
+
+function stopStreamFallbackPolling() {
+  if (streamFallbackTimer) window.clearInterval(streamFallbackTimer)
+  streamFallbackTimer = null
+}
+
+async function refreshRunningMessageFromHistory(progressMessage) {
+  const history = await getChatHistory(taskId.value)
+  let latestTrace = null
+  let latestAssistant = null
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index]
+    if (item.role === 'tool') {
+      const trace = parseTraceRecord(item.content)
+      if (trace && (!progressMessage.requestText || trace.requestText === progressMessage.requestText)) {
+        latestTrace = trace
+        continue
+      }
+    }
+    if (latestTrace && item.role === 'assistant') latestAssistant = item
+    if (latestTrace && latestAssistant) break
+    if (item.role === 'user' && latestTrace) break
+  }
+
+  if (latestTrace) {
+    progressMessage.requestText = progressMessage.requestText || latestTrace.requestText
+    progressMessage.progress = latestTrace.progress || progressMessage.progress
+    progressMessage.searchResults = latestTrace.searchResults || progressMessage.searchResults
+    progressMessage.artifacts = latestTrace.artifacts || progressMessage.artifacts
+    progressMessage.data = latestTrace.data
+    progressMessage.traceOpen = true
+  }
+
+  const assistantContent = String(latestAssistant?.content || '').trim()
+  if (assistantContent && assistantContent !== '正在生成回复...' && assistantContent !== progressMessage.content) {
+    progressMessage.title = 'Agent'
+    progressMessage.content = assistantContent
+  }
+
+  await scrollToBottom()
 }
 
 async function runAgent() {
@@ -377,44 +476,49 @@ async function runAgent() {
   }
   messages.value.push(progressMessage)
   await scrollToBottom()
+  startStreamFallbackPolling(progressMessage)
 
   try {
     const params = {
       conversation_record: conversationRecord.value,
       ...(currentTool ? { forced_tool: currentTool.value } : {})
     }
-    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments, currentTool), params }, event => {
-      handleStreamEvent(event, progressMessage)
+    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments, currentTool), params }, async event => {
+      await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = error?.response?.data?.detail || error.message || '调用失败，请检查后端服务。'
   } finally {
+    stopStreamFallbackPolling()
     loading.value = false
     await scrollToBottom()
   }
 }
 
-function handleStreamEvent(event, progressMessage) {
+async function handleStreamEvent(event, progressMessage) {
   if (event.type === 'report_format_required') {
     progressMessage.title = 'Agent · 等待选择'
     progressMessage.content = event.content
     progressMessage.needReportFormat = true
     progressMessage.progress.push('需要用户选择报告格式')
-    scrollToBottom()
+    progressMessage.traceOpen = true
+    await scrollToBottom()
     return
   }
 
   if (event.type === 'thinking' || event.type === 'tool_call' || event.type === 'llm_call') {
     progressMessage.content = event.content
     progressMessage.progress.push(event.content)
-    scrollToBottom()
+    progressMessage.traceOpen = true
+    await scrollToBottom()
     return
   }
 
   if (event.type === 'intent') {
     progressMessage.progress.push(event.content)
-    scrollToBottom()
+    progressMessage.traceOpen = true
+    await scrollToBottom()
     return
   }
 
@@ -425,12 +529,14 @@ function handleStreamEvent(event, progressMessage) {
       progressMessage.streamingAnswerStarted = true
     }
     enqueueAnswerDelta(progressMessage, event.content || '')
+    await nextTick()
     return
   }
 
   if (event.type === 'llm_fallback') {
     progressMessage.progress.push(event.content)
-    scrollToBottom()
+    progressMessage.traceOpen = true
+    await scrollToBottom()
     return
   }
 
@@ -460,7 +566,8 @@ function handleStreamEvent(event, progressMessage) {
         needConfirm: true
       })
     }
-    scrollToBottom()
+    progressMessage.traceOpen = true
+    await scrollToBottom()
     return
   }
 
@@ -468,7 +575,7 @@ function handleStreamEvent(event, progressMessage) {
     progressMessage.title = 'Agent'
     progressMessage.traceOpen = false
     finishTyping(progressMessage, event.content || progressMessage.content || '已完成。')
-    scrollToBottom()
+    await scrollToBottom()
     return
   }
 
@@ -480,6 +587,8 @@ function handleStreamEvent(event, progressMessage) {
   if (event.type === 'error') {
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = event.content || event.error || '调用失败。'
+    progressMessage.traceOpen = true
+    await scrollToBottom()
   }
 }
 
@@ -517,7 +626,9 @@ async function chooseReportFormat(item, format) {
         report_format: format,
         format
       }
-    }, event => handleStreamEvent(event, progressMessage))
+    }, async event => {
+      await handleStreamEvent(event, progressMessage)
+    })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = error?.response?.data?.detail || error.message || '报告生成失败。'
@@ -562,8 +673,9 @@ async function uploadSelectedFiles(files) {
       const form = new FormData()
       form.append('file', file)
       const uploaded = await uploadFile(taskId.value, form)
-      uploadedFiles.value.push(uploaded)
-      uploadedBatch.push(uploaded)
+      const normalized = normalizeRelatedFile(uploaded)
+      uploadedFiles.value.push(normalized)
+      uploadedBatch.push(normalized)
     }
     return uploadedBatch
   } finally {
@@ -578,9 +690,40 @@ function openComposerFilePicker() {
 async function attachFromComposer(event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
-  const uploadedBatch = await uploadSelectedFiles(files)
+  const uploadedBatch = selectedTool.value?.value === 'remote_sensing'
+    ? await uploadTemporaryImages(files)
+    : await uploadSelectedFiles(files)
   pendingFiles.value.push(...uploadedBatch)
   event.target.value = ''
+}
+
+async function uploadTemporaryImages(files) {
+  const invalidFiles = files.filter(file => !isImageLikeFile(file))
+  if (invalidFiles.length) {
+    messages.value.push({
+      id: crypto.randomUUID(),
+      role: 'agent',
+      title: 'Agent · 文件未接入',
+      content: `图像识别只支持图片文件，已忽略：${invalidFiles.map(file => file.name).join('、')}`
+    })
+  }
+
+  const imageFiles = files.filter(isImageLikeFile)
+  if (!imageFiles.length) return []
+
+  uploading.value = true
+  const uploadedBatch = []
+  try {
+    for (const file of imageFiles) {
+      const form = new FormData()
+      form.append('file', file)
+      const normalized = normalizeRelatedFile(await uploadTempFile(taskId.value, form))
+      uploadedBatch.push(normalized)
+    }
+    return uploadedBatch
+  } finally {
+    uploading.value = false
+  }
 }
 
 function removePendingFile(file) {
@@ -588,12 +731,82 @@ function removePendingFile(file) {
 }
 
 async function removeDocument(file) {
-  if (file.doc_id) {
-    await deleteTaskDocument(taskId.value, file.doc_id)
-  } else if (file.file_path) {
-    await deleteTaskDocumentByPath(taskId.value, file.file_path)
+  const key = documentKey(file)
+  if (!key || deletingDocumentKey.value) return
+
+  deletingDocumentKey.value = key
+  try {
+    if (isReportArtifactFile(file)) {
+      await deleteTaskArtifact(taskId.value, file.file_path)
+      removeArtifactFromMessages(file.file_path)
+    } else if (file.doc_id) {
+      await deleteTaskDocument(taskId.value, file.doc_id)
+    } else if (file.file_path) {
+      await deleteTaskDocumentByPath(taskId.value, file.file_path)
+    }
+    if (file.file_path) removedRelatedFilePaths.value.add(normalizeFilePath(file.file_path))
+    uploadedFiles.value = uploadedFiles.value.filter(item => {
+      if (documentKey(item) === key) return false
+      return normalizeFilePath(item.file_path) !== normalizeFilePath(file.file_path)
+    })
+    messages.value.push({
+      id: crypto.randomUUID(),
+      role: 'agent',
+      title: 'Agent · 文档已删除',
+      content: `已删除 **${file.filename || '相关文档'}**。后台会基于剩余相关文档重新构建当前任务知识图谱。`
+    })
+    await loadUploadedDocuments()
+  } catch (error) {
+    messages.value.push({
+      id: crypto.randomUUID(),
+      role: 'agent',
+      title: 'Agent · 删除失败',
+      content: error?.response?.data?.detail || error?.message || '删除相关文档失败，请查看后端日志。'
+    })
+  } finally {
+    deletingDocumentKey.value = ''
   }
-  uploadedFiles.value = uploadedFiles.value.filter(item => item !== file && item.file_path !== file.file_path)
+}
+
+function documentKey(file) {
+  return String(file?.doc_id || normalizeFilePath(file?.file_path) || file?.filename || '')
+}
+
+function normalizeFilePath(path) {
+  return String(path || '').replaceAll('\\', '/')
+}
+
+function normalizeRelatedFile(file) {
+  return {
+    ...file,
+    file_path: normalizeFilePath(file?.file_path)
+  }
+}
+
+function isReportArtifactFile(file) {
+  const path = normalizeFilePath(file?.file_path)
+  return file?.artifact?.type === 'report' || path.startsWith('data/reports/')
+}
+
+function removeArtifactFromMessages(path) {
+  const refs = relatedArtifactPaths(path)
+  for (const item of messages.value) {
+    if (!Array.isArray(item.artifacts)) continue
+    item.artifacts = item.artifacts.filter(artifact => !refs.has(normalizeFilePath(artifact.path)))
+  }
+}
+
+function relatedArtifactPaths(path) {
+  const normalized = normalizeFilePath(path)
+  const refs = new Set([normalized])
+  const dotIndex = normalized.lastIndexOf('.')
+  if (dotIndex > -1) {
+    const base = normalized.slice(0, dotIndex)
+    refs.add(`${base}.json`)
+    refs.add(`${base}.docx`)
+    refs.add(`${base}.pdf`)
+  }
+  return refs
 }
 
 async function refreshSession() {
@@ -742,6 +955,11 @@ function isUploadedImage(file) {
   return ['image', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'].some(token => value.includes(token))
 }
 
+function isImageLikeFile(file) {
+  const value = `${file.type || ''} ${file.name || file.filename || ''}`.toLowerCase()
+  return ['image/', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff'].some(token => value.includes(token))
+}
+
 function attachmentIcon(file) {
   const value = `${file.file_type || file.type || ''} ${file.filename || file.name || ''}`.toLowerCase()
   if (isUploadedImage(file)) return 'IMG'
@@ -759,8 +977,9 @@ function syncArtifactsToRelatedFiles(items) {
 function addArtifactsToRelatedFiles(artifacts = []) {
   for (const artifact of artifacts) {
     if (artifact.type !== 'report') continue
-    const path = String(artifact.path || '')
-    if (!path || uploadedFiles.value.some(file => file.file_path === path)) continue
+    const path = normalizeFilePath(artifact.path)
+    if (!path || uploadedFiles.value.some(file => normalizeFilePath(file.file_path) === path)) continue
+    if (removedRelatedFilePaths.value.has(path)) continue
     uploadedFiles.value.push({
       filename: artifactName(artifact),
       file_type: (artifact.metadata?.format || path.split('.').pop() || 'REPORT').toUpperCase(),
@@ -771,11 +990,7 @@ function addArtifactsToRelatedFiles(artifacts = []) {
 }
 
 function currentFilePayload(currentTurnFiles = [], currentTool = null) {
-  const selectedPaths = new Set(currentTurnFiles.map(file => file.file_path).filter(Boolean))
-  const onlyCurrentTurn = currentTool?.value === 'remote_sensing'
-  const files = currentTurnFiles.length || onlyCurrentTurn
-    ? uploadedFiles.value.filter(file => selectedPaths.has(file.file_path))
-    : uploadedFiles.value
+  const files = currentTurnFiles
   return files.map(file => ({
     path: file.file_path,
     name: file.filename,
@@ -847,9 +1062,5 @@ async function scrollToBottom() {
   if (messagePanel.value) messagePanel.value.scrollTop = messagePanel.value.scrollHeight
 }
 
-function pretty(value) {
-  if (typeof value === 'string') return value
-  return JSON.stringify(value, null, 2)
-}
 </script>
 

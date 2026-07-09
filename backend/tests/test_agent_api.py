@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api import agent as agent_api
 from app.db import Base
+from app.models.conversation import Document
 from app.models.task import Task
 
 
@@ -106,6 +107,17 @@ class AgentApiTest(unittest.TestCase):
 
         self.assertEqual(payload["data"]["retrieval_mode"], "provided_documents")
         self.assertEqual(payload["evidence"][0]["source"], "manual_doc")
+
+    def test_uploaded_document_merge_ignores_generated_reports(self):
+        db = self.SessionLocal()
+        db.add(Document(task_id=1, filename="source.docx", file_type="DOCX", file_path="data/uploads/1/source.docx"))
+        db.add(Document(task_id=1, filename="report.docx", file_type="DOCX", file_path="data/reports/report.docx"))
+        db.commit()
+
+        files = agent_api._with_uploaded_documents(db, 1, [])
+        db.close()
+
+        self.assertEqual([item["filename"] for item in files], ["source.docx"])
 
 
 if __name__ == "__main__":

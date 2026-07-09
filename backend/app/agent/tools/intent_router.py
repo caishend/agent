@@ -11,7 +11,6 @@ from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResu
 
 ALLOWED_TOOLS = {
     "graphrag",
-    "graphrag_ingest",
     "browser",
     "document",
     "remote_sensing",
@@ -64,12 +63,12 @@ class IntentRouterTool(BaseTool):
         "形成任务",
     )
     realtime_keywords = ("最新", "实时", "今天", "现在", "新闻", "搜索", "预警", "公告", "网页", "浏览器", "网上")
-    screenshot_keywords = ("截图", "截屏", "页面图", "网页图")
-    remote_sensing_keywords = ("遥感", "卫星", "影像", "淹没", "水体", "ndvi", "ndwi", "sar", "tif", "tiff")
+    screenshot_keywords = ("截图", "截屏", "页面图", "网页图", "截一张")
+    remote_sensing_keywords = ("遥感", "卫星", "影像", "淹没", "水体", "ndvi", "ndwi", "sar", "tif", "tiff", "识别图像")
     document_keywords = ("文档", "资料", "pdf", "word", "docx", "excel", "表格", "上传", "文件", "报告内容")
     report_keywords = ("报告", "生成文档", "导出", "pdf", "word")
     email_keywords = ("邮件", "通知", "发送", "抄送")
-    knowledge_keywords = ("为什么", "原因", "机制", "措施", "怎么", "如何", "解释")
+    knowledge_keywords = ("为什么", "原因", "机制", "措施", "怎么", "如何", "解释", "什么时候", "哪里", "影响")
     assessment_keywords = ("开始评估", "风险评估", "进行评估", "开始分析", "正式分析")
     confirmation_keywords = ("已确认", "确认", "保留这些", "就这些", "可以开始")
 
@@ -95,10 +94,13 @@ class IntentRouterTool(BaseTool):
                 }
             )
 
+        quick_plan = self._quick_browser_plan(query.lower(), tool_input)
+        if quick_plan:
+            return self._to_result(quick_plan)
+
         if self.use_llm and not params.get("disable_llm_router") and is_llm_configured():
             try:
-                llm_plan = self._route_with_llm(tool_input, context)
-                return self._to_result(llm_plan)
+                return self._to_result(self._route_with_llm(tool_input, context))
             except Exception as error:
                 fallback = self._route_with_rules(tool_input, context)
                 fallback["router_source"] = "rules_fallback"
@@ -121,14 +123,13 @@ class IntentRouterTool(BaseTool):
             "session_memory_keys": list(metadata.keys()),
             "available_tools": sorted(ALLOWED_TOOLS),
             "tool_policy": {
-                "plain_qa": "普通问答可不调用工具，tools 为空，由 LLM 直接回答。",
+                "plain_qa": "普通问答可不调工具，tools 为空，由 LLM 直接回答。",
                 "deep_research": "深度研究使用 graphrag；如果有上传文档，可同时使用 document。",
                 "document_qa": "针对上传 PDF/DOCX/TXT/MD 等文档，使用 document；必要时再 graphrag。",
                 "browser": "需要最新、实时、网页、公告、预警、浏览器搜索或截图时使用 browser。",
                 "remote_sensing": "图像识别、遥感、卫星影像、水体/淹没区域识别使用 remote_sensing。",
-                "disaster_analysis": "识别出用户要进入灾害分析时，先生成 task_draft，need_user_confirm=true；确认前不要调用 risk_assessment。",
-                "risk_assessment": "只有用户已确认任务信息或上下文 confirmed_task=true 后才调用 risk_assessment。",
-                "report": "生成 Word/PDF 报告时调用 report；若缺少风险评估可先调用 risk_assessment。",
+                "disaster_analysis": "灾害分析/报告生成可调用 browser、graphrag、document、task_draft、memory、risk_assessment、report。",
+                "graphrag": "GraphRAG 只检索当前任务上传的文档；知识图谱构建由上传/删除文档接口后台完成，不要在对话中构建图谱。",
                 "email": "发送邮件或通知调用 email。",
             },
         }
@@ -195,11 +196,18 @@ class IntentRouterTool(BaseTool):
             intents.append(primary_intent)
             tools.append("risk_assessment")
             next_step = "run_risk_assessment"
+        elif signals["disaster"] and (signals["report"] or "报告" in normalized_query):
+            primary_intent = "disaster_analysis"
+            intents.append(primary_intent)
+            tools = self._disaster_report_tools(tools)
+            next_step = "generate_report"
         elif signals["disaster"]:
             primary_intent = "disaster_analysis"
             intents.append(primary_intent)
-            if not any(tool in tools for tool in ("browser", "document", "remote_sensing")):
-                tools.insert(0, "graphrag")
+            if "browser" not in tools:
+                tools.insert(0, "browser")
+            if "graphrag" not in tools:
+                tools.append("graphrag")
             tools.append("task_draft")
             next_step = "confirm_task_draft"
             need_user_confirm = True
@@ -228,9 +236,6 @@ class IntentRouterTool(BaseTool):
             intents.append(primary_intent)
             tools = []
 
-        if any(tool in tools for tool in ("document", "graphrag")) and primary_intent not in {"general_qa", "small_talk", "knowledge_or_general_qa"}:
-            tools = self._insert_before_report(tools, "graphrag_ingest")
-
         return {
             "primary_intent": primary_intent,
             "intents": self._dedupe(intents),
@@ -249,8 +254,7 @@ class IntentRouterTool(BaseTool):
         next_step = str(plan.get("next_step") or "answer")
         if next_step not in ALLOWED_NEXT_STEPS:
             next_step = self._infer_next_step(primary_intent, tools, bool(plan.get("need_user_confirm", False)))
-        confidence = float(plan.get("confidence") or 0.75)
-        confidence = max(0.0, min(confidence, 1.0))
+        confidence = max(0.0, min(float(plan.get("confidence") or 0.75), 1.0))
         need_user_confirm = bool(plan.get("need_user_confirm", False))
 
         if "risk_assessment" in tools and need_user_confirm:
@@ -259,12 +263,10 @@ class IntentRouterTool(BaseTool):
             tools = ["browser"]
             next_step = "answer"
             need_user_confirm = False
-        if primary_intent == "disaster_analysis":
+        if primary_intent == "disaster_analysis" and "report" in tools:
             tools = self._disaster_report_tools(tools)
             need_user_confirm = False
             next_step = "generate_report"
-        elif self._should_ingest_graph(primary_intent, intents, tools):
-            tools = self._insert_before_report(tools, "graphrag_ingest")
 
         return {
             "primary_intent": primary_intent,
@@ -279,7 +281,7 @@ class IntentRouterTool(BaseTool):
         }
 
     def _infer_next_step(self, primary_intent: str, tools: list[str], need_user_confirm: bool) -> str:
-        if need_user_confirm or primary_intent == "disaster_analysis":
+        if need_user_confirm:
             return "confirm_task_draft"
         if "email" in tools:
             return "send_email"
@@ -292,16 +294,8 @@ class IntentRouterTool(BaseTool):
     def _disaster_report_tools(self, tools: list[str]) -> list[str]:
         ordered = ["browser", "graphrag"]
         ordered.extend(tool for tool in tools if tool in {"document", "remote_sensing"})
-        ordered.extend(["task_draft", "memory", "risk_assessment", "graphrag_ingest", "report"])
+        ordered.extend(["task_draft", "memory", "risk_assessment", "report"])
         return self._dedupe(ordered)
-
-    def _insert_before_report(self, tools: list[str], tool_name: str) -> list[str]:
-        if tool_name in tools:
-            return tools
-        if "report" not in tools:
-            return [*tools, tool_name]
-        index = tools.index("report")
-        return [*tools[:index], tool_name, *tools[index:]]
 
     def _to_result(self, plan: dict[str, Any]) -> ToolResult:
         tools = plan.get("tools", [])
@@ -325,15 +319,11 @@ class IntentRouterTool(BaseTool):
         normalized_query: str,
     ) -> dict[str, Any] | None:
         file_profile = self._profile_files(tool_input.files)
-        has_realtime_need = self._contains_any(normalized_query, self.realtime_keywords) or self._contains_any(
-            normalized_query, self.screenshot_keywords
-        )
 
         if forced_tool == "browser":
             return {"tools": ["browser"], "next_step": "answer", "need_user_confirm": False}
         if forced_tool in {"research", "graphrag", "document"}:
             tools = ["document", "graphrag"] if file_profile["has_document"] else ["graphrag"]
-            tools.append("graphrag_ingest")
             return {"tools": tools, "next_step": "answer", "need_user_confirm": False}
         if forced_tool == "remote_sensing":
             return {"tools": ["remote_sensing"], "next_step": "answer", "need_user_confirm": False}
@@ -343,7 +333,7 @@ class IntentRouterTool(BaseTool):
                 tools.append("document")
             if file_profile["has_image"]:
                 tools.append("remote_sensing")
-            tools.extend(["task_draft", "memory", "risk_assessment", "graphrag_ingest", "report"])
+            tools.extend(["task_draft", "memory", "risk_assessment", "report"])
             return {"tools": self._dedupe(tools), "next_step": "generate_report", "need_user_confirm": False}
         if forced_tool == "report":
             return {"tools": ["risk_assessment", "report"], "next_step": "generate_report", "need_user_confirm": False}
@@ -353,53 +343,63 @@ class IntentRouterTool(BaseTool):
             return {"tools": ["risk_assessment"], "next_step": "run_risk_assessment", "need_user_confirm": False}
         return None
 
+    def _quick_browser_plan(self, normalized_query: str, tool_input: ToolInput) -> dict[str, Any] | None:
+        if tool_input.files:
+            return None
+        browser_signals = ("截图", "截屏", "截一张", "图片", "网页", "官网", "搜索", "最新", "介绍", "新闻", "预警")
+        analysis_signals = ("灾害分析", "风险评估", "生成报告", "报告", "建档", "知识图谱", "构建图谱")
+        if any(keyword in normalized_query for keyword in browser_signals) and not any(
+            keyword in normalized_query for keyword in analysis_signals
+        ):
+            return {
+                "primary_intent": "browser_search",
+                "intents": ["browser_search"],
+                "tools": ["browser"],
+                "next_step": "answer",
+                "need_user_confirm": False,
+                "confidence": 0.9,
+                "reason": "检测到明确的网页搜索/截图/图片请求，直接调用浏览器工具，跳过 LLM 意图识别。",
+                "signals": {"browser_fast_path": True},
+                "router_source": "rules_fast_path",
+            }
+        return None
+
     def _profile_files(self, files: list[dict[str, Any]]) -> dict[str, bool]:
         has_image = False
         has_document = False
         for file_info in files:
-            file_name = str(file_info.get("name") or file_info.get("filename") or "")
+            file_name = str(file_info.get("name") or file_info.get("filename") or file_info.get("path") or "")
             mime_type = str(file_info.get("type") or file_info.get("mime_type") or "").lower()
             extension = Path(file_name).suffix.lower()
             has_image = has_image or mime_type.startswith("image/") or extension in self.image_extensions
             has_document = (
                 has_document
-                or mime_type in {"application/pdf", "text/plain"}
-                or "document" in mime_type
-                or "spreadsheet" in mime_type
                 or extension in self.document_extensions
+                or any(token in mime_type for token in ("pdf", "word", "document", "text", "spreadsheet"))
             )
-        return {"has_image": has_image, "has_document": has_document}
+        return {"has_image": has_image, "has_document": has_document, "file_count": len(files)}
 
-    def _has_confirmed_task(
-        self,
-        params: dict[str, Any],
-        context: ToolContext | None,
-        normalized_query: str,
-    ) -> bool:
-        if params.get("confirmed_task") or params.get("task_confirmed"):
-            return True
-        if context and context.metadata.get("confirmed_task"):
-            return True
-        return self._contains_any(normalized_query, self.confirmation_keywords)
+    def _has_confirmed_task(self, params: dict[str, Any], context: ToolContext | None, query: str) -> bool:
+        metadata = context.metadata if context else {}
+        return bool(
+            params.get("confirmed_task")
+            or metadata.get("confirmed_task")
+            or metadata.get("formal_memory")
+            or self._contains_any(query, self.confirmation_keywords)
+        )
 
-    def _estimate_confidence(
-        self,
-        primary_intent: str,
-        signals: dict[str, bool],
-        file_profile: dict[str, bool],
-    ) -> float:
-        if primary_intent in {"general_qa", "knowledge_or_general_qa"}:
-            return 0.72
-        if file_profile["has_image"] or file_profile["has_document"]:
-            return 0.86
-        matched_signals = sum(1 for matched in signals.values() if matched)
-        return min(0.92, 0.70 + matched_signals * 0.04)
+    def _estimate_confidence(self, primary_intent: str, signals: dict[str, bool], file_profile: dict[str, Any]) -> float:
+        if primary_intent in {"small_talk", "realtime_search"}:
+            return 0.88
+        score = 0.62 + sum(0.06 for value in signals.values() if value)
+        if file_profile.get("file_count"):
+            score += 0.08
+        return min(score, 0.94)
 
     def _contains_any(self, text: str, keywords: tuple[str, ...]) -> bool:
-        return any(keyword.lower() in text for keyword in keywords)
+        return any(keyword and keyword in text for keyword in keywords)
 
-    def _is_small_talk(self, text: str) -> bool:
-        normalized = text.strip().lower()
+    def _is_small_talk(self, normalized: str) -> bool:
         greetings = {"你好", "您好", "hi", "hello", "哈喽", "在吗", "嗨", "早上好", "晚上好"}
         return normalized in greetings or (len(normalized) <= 6 and any(word in normalized for word in greetings))
 
@@ -418,23 +418,13 @@ class IntentRouterTool(BaseTool):
             for keyword in ("screenshot", "get_screenshot", "realtime_search", "browser", "web_search")
         )
 
-    def _should_ingest_graph(self, primary_intent: str, intents: list[str], tools: list[str]) -> bool:
-        if "graphrag_ingest" in tools:
-            return False
-        graph_writing_intents = {"disaster_analysis", "report_generation", "risk_assessment", "task_draft", "knowledge_graph_build"}
-        normalized_intents = {item.lower() for item in intents}
-        if primary_intent.lower() in graph_writing_intents or normalized_intents.intersection(graph_writing_intents):
-            return any(tool in tools for tool in ("document", "graphrag", "browser", "risk_assessment", "report"))
-        return False
-
 
 def _router_system_prompt() -> str:
     return (
         "你是 SkyGuard Agent 的意图路由器，只输出 JSON 对象，不要输出 Markdown。"
         "你需要判断用户本轮输入是否需要调用工具，以及工具调用顺序。"
-        "必须遵守：灾害分析先 task_draft 并 need_user_confirm=true；用户确认前不能 risk_assessment。"
         "普通问答可以 tools=[]。工具只能从 available_tools 中选择。"
-        "如果用户只是要求网页搜索、最新信息或截图，tools 只能包含 browser，不要调用 graphrag_ingest。"
-        "只有灾害分析、报告生成、风险评估、任务建档或用户明确要求构建知识图谱时，才允许调用 graphrag_ingest。"
+        "如果用户只是要求网页搜索、最新信息或截图，tools 只能包含 browser。"
+        "GraphRAG 只用于检索当前任务上传的文档；不要规划知识图谱构建工具。"
         "JSON 字段：primary_intent, intents, tools, next_step, need_user_confirm, confidence, reason, signals。"
     )
