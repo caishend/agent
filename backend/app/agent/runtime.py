@@ -1,6 +1,7 @@
 """Agent tool orchestration runtime."""
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -16,6 +17,71 @@ from app.agent.tools.remote_sensing import RemoteSensingTool
 from app.agent.tools.report import ReportTool
 from app.agent.tools.risk_assessment import RiskAssessmentTool
 from app.agent.tools.task_draft import TaskDraftTool
+
+
+def _chunk_text(text: str, size: int = 8) -> Iterator[str]:
+    for index in range(0, len(text), size):
+        yield text[index : index + size]
+
+
+def _artifact_public_url(artifact_path: str, artifact_type: str) -> str:
+    normalized = str(artifact_path or "").replace("\\", "/")
+    filename = normalized.rsplit("/", 1)[-1]
+    if artifact_type == "screenshot" and filename:
+        return f"/artifacts/screenshots/{filename}"
+    if artifact_type == "report" and filename:
+        return f"/artifacts/reports/{filename}"
+    marker = "data/remote_sensing/"
+    if artifact_type in {"remote_sensing_overlay", "object_detection"} and marker in normalized:
+        return "/artifacts/remote-sensing/" + normalized.split(marker, 1)[1]
+    return normalized
+
+
+def _image_result_appendix(results: dict[str, ToolResult]) -> str:
+    result = results.get("remote_sensing")
+    if not result or result.data.get("remote_sensing_status") != "analyzed":
+        return ""
+
+    aggregate = result.data.get("aggregate") or {}
+    images = result.data.get("images") or []
+    artifacts = [item.__dict__ for item in result.artifacts]
+    overlay_urls = [
+        _artifact_public_url(item.get("path", ""), item.get("type", ""))
+        for item in artifacts
+        if item.get("type") == "remote_sensing_overlay"
+    ]
+    detection_urls = [
+        _artifact_public_url(item.get("path", ""), item.get("type", ""))
+        for item in artifacts
+        if item.get("type") == "object_detection"
+    ]
+
+    lines = ["", "### 图像处理结果"]
+    lines.append(f"- 模型状态：{images[0].get('model_status', 'unknown') if images else 'unknown'}")
+    if images and images[0].get("gate"):
+        lines.append(f"- 门控结果：{images[0]['gate']}")
+    lines.append(f"- 疑似灾害类型：{aggregate.get('affected_class_name', 'unknown')}")
+    lines.append(f"- 影响区域占比：{float(aggregate.get('affected_ratio') or 0):.2%}")
+    lines.append(f"- 检测框数量：{int(aggregate.get('detection_count') or 0)}")
+    if overlay_urls:
+        lines.append(f"- 灾害区域叠加图：{overlay_urls[0]}")
+    if detection_urls:
+        lines.append(f"- 物体检测标注图：{detection_urls[0]}")
+
+    top_detections: list[dict[str, Any]] = []
+    for image in images:
+        top_detections.extend(image.get("detections") or [])
+    top_detections.sort(key=lambda item: float(item.get("confidence") or 0), reverse=True)
+    if top_detections:
+        lines.append("- Top 检测结果：")
+        for item in top_detections[:5]:
+            bbox = item.get("bbox") or []
+            lines.append(
+                f"  - {item.get('class_name') or item.get('label')} "
+                f"conf={float(item.get('confidence') or 0):.2f}, bbox={bbox}"
+            )
+
+    return "\n".join(lines)
 
 
 class AgentSessionStore:
@@ -147,6 +213,22 @@ def iter_agent_events(
             "content": f"LLM 调用失败，已降级为工具摘要：{error}",
             "error": str(error),
         }
+        for chunk in _chunk_text(answer):
+            time.sleep(0.03)
+            yield {"type": "answer_delta", "content": chunk}
+
+    if not answer:
+        answer = synthesize_answer(message, results, metadata)
+        for chunk in _chunk_text(answer):
+            time.sleep(0.03)
+            yield {"type": "answer_delta", "content": chunk}
+
+    image_appendix = _image_result_appendix(results)
+    if image_appendix and image_appendix not in answer:
+        answer += image_appendix
+        for chunk in _chunk_text(image_appendix):
+            time.sleep(0.03)
+            yield {"type": "answer_delta", "content": chunk}
 
     yield {"type": "answer", "content": answer}
     yield {"type": "done", "content": "完成", "session": metadata}

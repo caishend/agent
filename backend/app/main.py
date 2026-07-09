@@ -25,8 +25,12 @@ app.include_router(documents.router, prefix="/api/tasks", tags=["文件"])
 app.include_router(agent.router, prefix="/api/tasks", tags=["Agent"])
 Path("data/screenshots").mkdir(parents=True, exist_ok=True)
 Path("data/reports").mkdir(parents=True, exist_ok=True)
+Path("data/remote_sensing").mkdir(parents=True, exist_ok=True)
+Path("data/uploads").mkdir(parents=True, exist_ok=True)
 app.mount("/artifacts/screenshots", StaticFiles(directory="data/screenshots"), name="screenshots")
 app.mount("/artifacts/reports", StaticFiles(directory="data/reports"), name="reports")
+app.mount("/artifacts/remote-sensing", StaticFiles(directory="data/remote_sensing"), name="remote_sensing")
+app.mount("/artifacts/uploads", StaticFiles(directory="data/uploads"), name="uploads")
 
 
 @app.get("/")

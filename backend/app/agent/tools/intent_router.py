@@ -94,6 +94,15 @@ class IntentRouterTool(BaseTool):
                 }
             )
 
+        quick_plan = self._route_with_rules(tool_input, context)
+        if (
+            quick_plan.get("primary_intent") in {"small_talk", "general_qa"}
+            and not quick_plan.get("tools")
+        ):
+            quick_plan["router_source"] = "rules_fast"
+            quick_plan["reason"] = "普通对话直接快速路由，不等待非流式意图识别。"
+            return self._to_result(quick_plan)
+
         if self.use_llm and not params.get("disable_llm_router") and is_llm_configured():
             try:
                 llm_plan = self._route_with_llm(tool_input, context)

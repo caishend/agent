@@ -1,3 +1,5 @@
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -19,6 +21,12 @@ class Settings(BaseSettings):
     # 文件存储
     UPLOAD_DIR: str = "data/uploads"
     REPORT_DIR: str = "data/reports"
+
+    # Disaster image recognition model migrated from ../disaster
+    DISASTER_MODEL_ENABLED: bool = True
+    DISASTER_MODEL_DIR: str = "disaster"
+    DISASTER_MODEL_DEVICE: str = "auto"
+    DISASTER_GATE_THRESHOLD: Optional[float] = 0.9
 
     # 搜索
     BOCHA_API_KEY: str = ""

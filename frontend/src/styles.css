@@ -253,7 +253,8 @@ textarea { resize: none; }
 .ghost-button,
 .solid-button,
 .send-button,
-.attach-button {
+.attach-button,
+.tool-button {
   border-radius: 999px;
   transition: 0.16s ease;
 }
@@ -339,7 +340,21 @@ textarea { resize: none; }
 
 .message-row.user {
   max-width: 760px;
-  margin-right: max(44px, 8vw);
+  grid-template-columns: minmax(0, 1fr) 34px;
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.message-row.user .avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.message-row.user .bubble {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  text-align: right;
 }
 
 .avatar {
@@ -437,6 +452,53 @@ textarea { resize: none; }
   padding: 12px 16px;
   border-radius: 20px;
   background: #f3f3f1;
+  text-align: left;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.message-row.user .message-attachments {
+  justify-content: flex-end;
+}
+
+.message-attachment {
+  max-width: 260px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.message-attachment:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-soft);
+}
+
+.message-attachment strong,
+.message-attachment small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment strong {
+  font-size: 13px;
+}
+
+.message-attachment small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .json-block {
@@ -581,6 +643,7 @@ textarea { resize: none; }
 }
 
 .attach-button,
+.tool-button,
 .send-button {
   width: 36px;
   height: 36px;
@@ -593,6 +656,12 @@ textarea { resize: none; }
   background: #f1f2f1;
 }
 
+.tool-button {
+  color: var(--muted);
+  background: #f7f8f8;
+  border: 1px solid var(--line);
+}
+
 .send-button {
   color: #fff;
   background: #111;
@@ -600,6 +669,7 @@ textarea { resize: none; }
 }
 
 .attach-button:hover { background: #e7e9e8; }
+.tool-button:hover { color: var(--text); background: #fff; }
 .send-button:hover { transform: translateY(-1px); }
 
 .app-shell {
@@ -992,6 +1062,85 @@ textarea { resize: none; }
   box-shadow: 0 18px 55px rgba(31, 37, 36, 0.13);
 }
 
+.composer-files {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 118px;
+  overflow: auto;
+  padding: 0 2px 2px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.composer-file-chip {
+  min-width: 0;
+  max-width: 220px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 7px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.composer-file-chip img,
+.message-attachment img {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.composer-file-chip > span,
+.attachment-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.composer-file-chip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.composer-file-chip button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.composer-file-chip button:hover {
+  color: var(--danger);
+  background: #fff;
+}
+
 .simple-composer textarea {
   min-height: 36px;
   max-height: 160px;
@@ -1005,7 +1154,7 @@ textarea { resize: none; }
   position: relative;
 }
 
-.attach-button.active {
+.tool-button.active {
   color: #fff;
   background: var(--accent);
 }
@@ -1239,10 +1388,18 @@ textarea { resize: none; }
 .artifact-card img {
   display: block;
   width: 100%;
-  max-height: 240px;
-  object-fit: cover;
+  max-height: 420px;
+  object-fit: contain;
+  background: #fff;
   border-radius: 10px;
   border: 1px solid var(--line);
+}
+
+.artifact-meta {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .artifact-card small {

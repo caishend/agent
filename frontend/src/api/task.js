@@ -1,27 +1,32 @@
 import http from './index'
 
-export const getTasks    = ()       => http.get('/tasks')
-export const getTask     = (id)     => http.get(`/tasks/${id}`)
-export const createTask  = (data)   => http.post('/tasks', data)
-export const deleteTask  = (id)     => http.delete(`/tasks/${id}`)
-export const uploadFile  = (id, form) => http.post(`/tasks/${id}/upload`, form, {
+export const getTasks = () => http.get('/tasks')
+export const getTask = (id) => http.get(`/tasks/${id}`)
+export const createTask = (data) => http.post('/tasks', data)
+export const deleteTask = (id) => http.delete(`/tasks/${id}`)
+export const uploadFile = (id, form) => http.post(`/tasks/${id}/upload`, form, {
   headers: { 'Content-Type': 'multipart/form-data' }
 })
+export const getTaskDocuments = (id) => http.get(`/tasks/${id}/documents`)
 export const runAgentMessage = (id, data) => http.post(`/tasks/${id}/agent/message`, data)
 export const getChatHistory = (id) => http.get(`/tasks/${id}/chat`)
+
 export async function streamAgentMessage(id, data, onEvent) {
   const token = localStorage.getItem('token')
   const response = await fetch(`/api/tasks/${id}/agent/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     body: JSON.stringify(data)
   })
 
   if (!response.ok || !response.body) {
-    throw new Error(`流式请求失败：HTTP ${response.status}`)
+    const detail = await response.text().catch(() => '')
+    throw new Error(detail || `Stream request failed: HTTP ${response.status}`)
   }
 
   const reader = response.body.getReader()
@@ -32,24 +37,40 @@ export async function streamAgentMessage(id, data, onEvent) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    const chunks = buffer.split('\n\n')
-    buffer = chunks.pop() || ''
+    buffer = consumeSseBuffer(buffer, onEvent)
+  }
 
-    for (const chunk of chunks) {
-      const line = chunk.split('\n').find(item => item.startsWith('data: '))
-      if (!line) continue
-      onEvent(JSON.parse(line.slice(6)))
+  buffer += decoder.decode()
+  consumeSseBuffer(`${buffer}\n\n`, onEvent)
+}
+
+function consumeSseBuffer(buffer, onEvent) {
+  const chunks = buffer.split(/\r?\n\r?\n/)
+  const rest = chunks.pop() || ''
+
+  for (const chunk of chunks) {
+    const data = chunk
+      .split(/\r?\n/)
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.replace(/^data:\s?/, ''))
+      .join('\n')
+      .trim()
+    if (!data || data === '[DONE]') continue
+
+    try {
+      onEvent(JSON.parse(data))
+    } catch (error) {
+      onEvent({ type: 'error', content: `Stream parse failed: ${error.message}` })
     }
   }
 
-  if (buffer.trim().startsWith('data: ')) {
-    onEvent(JSON.parse(buffer.trim().slice(6)))
-  }
+  return rest
 }
+
 export const confirmDraft = (id, data) => http.post(`/tasks/${id}/agent/confirm-draft`, data)
 export const getAgentSession = (id) => http.get(`/tasks/${id}/agent/session`)
 export const clearAgentSession = (id) => http.delete(`/tasks/${id}/agent/session`)
 export const runTool = (id, toolName, data) => http.post(`/tasks/${id}/tools/${toolName}`, data)
-export const getAnalysis = (id)     => http.get(`/tasks/${id}/analysis`)
-export const getReport   = (id)     => http.get(`/tasks/${id}/report`, { responseType: 'blob' })
-export const sendReport  = (id, data) => http.post(`/tasks/${id}/report/send`, data)
+export const getAnalysis = (id) => http.get(`/tasks/${id}/analysis`)
+export const getReport = (id) => http.get(`/tasks/${id}/report`, { responseType: 'blob' })
+export const sendReport = (id, data) => http.post(`/tasks/${id}/report/send`, data)
