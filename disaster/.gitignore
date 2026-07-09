@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# Data
+*.tar
+*.zip
+*.gz
+data/
+merged_five*/
+
+# Outputs
+outputs/
+*.png
+*.jpg
+*.jpeg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Env
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+.claude/*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+backend_output/*
+saved_models/*
+pipeline_output/*
+test_images/*
