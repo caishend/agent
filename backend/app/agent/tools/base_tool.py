@@ -48,8 +48,19 @@ class ToolResult:
 
     def to_text(self) -> str:
         lines = [self.summary]
-        if self.confidence is not None:
-            lines.append(f"可信度：{self.confidence:.2f}")
+        if self.evidence:
+            sources = []
+            seen = set()
+            for item in self.evidence:
+                source = str(item.source or "").strip()
+                if not source or source in seen:
+                    continue
+                seen.add(source)
+                sources.append(source)
+                if len(sources) >= 4:
+                    break
+            if sources:
+                lines.append(f"证据来源：{'、'.join(sources)}")
         if self.need_user_confirm:
             lines.append("需要用户确认后再写入正式任务记忆。")
         return "\n".join(lines)

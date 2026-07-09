@@ -10,6 +10,15 @@ venv/
 
 # 数据目录
 data/
+backend/data/uploads/
+backend/data/reports/
+backend/data/screenshots/
+backend/data/*.tif
+backend/data/*.tiff
+backend/data/**/*.tif
+backend/data/**/*.tiff
+backend/data/*.zip
+backend/data/**/*.zip
 knowledge/output/
 backend/app/agent/models/weights/
 

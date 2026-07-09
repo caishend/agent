@@ -2,11 +2,30 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from sqlalchemy import text
 
-from app.api import agent, auth, chat, documents, tasks
+from app.api import agent, auth, chat, documents, overview, tasks
 from app.db import Base, engine
+import app.models  # noqa: F401
 
 Base.metadata.create_all(bind=engine)
+
+
+def ensure_runtime_schema() -> None:
+    if engine.dialect.name != "mysql":
+        return
+    for statement in (
+        "ALTER TABLE conversation MODIFY role ENUM('user','assistant','tool') NOT NULL",
+        "ALTER TABLE conversation MODIFY content LONGTEXT NOT NULL",
+    ):
+        try:
+            with engine.begin() as connection:
+                connection.execute(text(statement))
+        except Exception:
+            pass
+
+
+ensure_runtime_schema()
 
 app = FastAPI(title="SkyGuard API", version="1.0.0")
 
@@ -23,10 +42,13 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["任务"])
 app.include_router(chat.router, prefix="/api/tasks", tags=["对话"])
 app.include_router(documents.router, prefix="/api/tasks", tags=["文件"])
 app.include_router(agent.router, prefix="/api/tasks", tags=["Agent"])
+app.include_router(overview.router, prefix="/api/overview", tags=["Overview"])
 Path("data/screenshots").mkdir(parents=True, exist_ok=True)
 Path("data/reports").mkdir(parents=True, exist_ok=True)
+Path("data/uploads").mkdir(parents=True, exist_ok=True)
 app.mount("/artifacts/screenshots", StaticFiles(directory="data/screenshots"), name="screenshots")
 app.mount("/artifacts/reports", StaticFiles(directory="data/reports"), name="reports")
+app.mount("/artifacts/uploads", StaticFiles(directory="data/uploads"), name="uploads")
 
 
 @app.get("/")

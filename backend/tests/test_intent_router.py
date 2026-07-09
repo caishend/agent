@@ -47,7 +47,7 @@ class IntentRouterToolTest(unittest.TestCase):
         self.assertEqual(result.data["primary_intent"], "manual_disaster_analysis")
         self.assertEqual(
             result.data["tools"],
-            ["browser", "graphrag", "task_draft", "memory", "risk_assessment", "report"],
+            ["browser", "graphrag", "task_draft", "memory", "risk_assessment", "graphrag_ingest", "report"],
         )
         self.assertFalse(result.need_user_confirm)
         self.assertEqual(result.data["next_step"], "generate_report")

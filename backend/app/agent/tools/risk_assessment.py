@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.tools.base_tool import EvidenceItem, BaseTool, ToolContext, ToolInput, ToolResult
+from app.services.local_geodata import estimate_population_for_locations
 
 
 class RiskAssessmentTool(BaseTool):
@@ -95,6 +96,18 @@ class RiskAssessmentTool(BaseTool):
         risk_factors.extend(evidence_factors)
         basis.extend(evidence_basis)
 
+        population_context = self._estimate_population_context(locations, risk_score)
+        if population_context.get("available"):
+            exposed_population = int(population_context.get("total_exposed_population") or 0)
+            if exposed_population:
+                if risk_score < 0.75:
+                    risk_score += self._score_population_exposure(exposed_population)
+                risk_factors.append(f"本地人口栅格显示影响半径内暴露人口约{exposed_population:,}人")
+                basis.append(
+                    f"人口暴露估算：基于本地 WorldPop 100m 栅格，半径{population_context.get('radius_km')}km，"
+                    f"暴露人口约{exposed_population:,}人"
+                )
+
         for field in ("影响区域", "时间范围", "灾害类型"):
             if field in missing_info:
                 risk_score -= 0.05
@@ -110,7 +123,27 @@ class RiskAssessmentTool(BaseTool):
             "basis": basis,
             "suggestions": self._suggestions(disaster_type, risk_level),
             "missing_info": missing_info,
+            "population_context": population_context,
         }
+
+    def _estimate_population_context(self, locations: list[str], risk_score: float) -> dict[str, Any]:
+        if not locations:
+            return {"available": False, "reason": "缺少可匹配地点"}
+        radius = 5
+        if risk_score >= 0.75:
+            radius = 15
+        elif risk_score >= 0.45:
+            radius = 8
+        return estimate_population_for_locations(locations, radius)
+
+    def _score_population_exposure(self, exposed_population: int) -> float:
+        if exposed_population >= 1_000_000:
+            return 0.04
+        if exposed_population >= 300_000:
+            return 0.03
+        if exposed_population >= 50_000:
+            return 0.02
+        return 0.01
 
     def _score_evidence(
         self,

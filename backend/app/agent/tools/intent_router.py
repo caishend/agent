@@ -11,6 +11,7 @@ from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResu
 
 ALLOWED_TOOLS = {
     "graphrag",
+    "graphrag_ingest",
     "browser",
     "document",
     "remote_sensing",
@@ -227,6 +228,9 @@ class IntentRouterTool(BaseTool):
             intents.append(primary_intent)
             tools = []
 
+        if any(tool in tools for tool in ("document", "graphrag")) and primary_intent not in {"general_qa", "small_talk", "knowledge_or_general_qa"}:
+            tools = self._insert_before_report(tools, "graphrag_ingest")
+
         return {
             "primary_intent": primary_intent,
             "intents": self._dedupe(intents),
@@ -251,10 +255,16 @@ class IntentRouterTool(BaseTool):
 
         if "risk_assessment" in tools and need_user_confirm:
             tools = [tool for tool in tools if tool != "risk_assessment"]
+        if self._is_browser_only_intent(primary_intent, intents, tools):
+            tools = ["browser"]
+            next_step = "answer"
+            need_user_confirm = False
         if primary_intent == "disaster_analysis":
             tools = self._disaster_report_tools(tools)
             need_user_confirm = False
             next_step = "generate_report"
+        elif self._should_ingest_graph(primary_intent, intents, tools):
+            tools = self._insert_before_report(tools, "graphrag_ingest")
 
         return {
             "primary_intent": primary_intent,
@@ -282,8 +292,16 @@ class IntentRouterTool(BaseTool):
     def _disaster_report_tools(self, tools: list[str]) -> list[str]:
         ordered = ["browser", "graphrag"]
         ordered.extend(tool for tool in tools if tool in {"document", "remote_sensing"})
-        ordered.extend(["task_draft", "memory", "risk_assessment", "report"])
+        ordered.extend(["task_draft", "memory", "risk_assessment", "graphrag_ingest", "report"])
         return self._dedupe(ordered)
+
+    def _insert_before_report(self, tools: list[str], tool_name: str) -> list[str]:
+        if tool_name in tools:
+            return tools
+        if "report" not in tools:
+            return [*tools, tool_name]
+        index = tools.index("report")
+        return [*tools[:index], tool_name, *tools[index:]]
 
     def _to_result(self, plan: dict[str, Any]) -> ToolResult:
         tools = plan.get("tools", [])
@@ -315,6 +333,7 @@ class IntentRouterTool(BaseTool):
             return {"tools": ["browser"], "next_step": "answer", "need_user_confirm": False}
         if forced_tool in {"research", "graphrag", "document"}:
             tools = ["document", "graphrag"] if file_profile["has_document"] else ["graphrag"]
+            tools.append("graphrag_ingest")
             return {"tools": tools, "next_step": "answer", "need_user_confirm": False}
         if forced_tool == "remote_sensing":
             return {"tools": ["remote_sensing"], "next_step": "answer", "need_user_confirm": False}
@@ -324,7 +343,7 @@ class IntentRouterTool(BaseTool):
                 tools.append("document")
             if file_profile["has_image"]:
                 tools.append("remote_sensing")
-            tools.extend(["task_draft", "memory", "risk_assessment", "report"])
+            tools.extend(["task_draft", "memory", "risk_assessment", "graphrag_ingest", "report"])
             return {"tools": self._dedupe(tools), "next_step": "generate_report", "need_user_confirm": False}
         if forced_tool == "report":
             return {"tools": ["risk_assessment", "report"], "next_step": "generate_report", "need_user_confirm": False}
@@ -387,6 +406,27 @@ class IntentRouterTool(BaseTool):
     def _dedupe(self, values: list[str]) -> list[str]:
         return list(dict.fromkeys(values))
 
+    def _is_browser_only_intent(self, primary_intent: str, intents: list[str], tools: list[str]) -> bool:
+        normalized_intents = {item.lower() for item in intents}
+        primary = primary_intent.lower()
+        if "browser" not in tools:
+            return False
+        if any(tool in tools for tool in ("task_draft", "risk_assessment", "report", "document", "graphrag", "remote_sensing")):
+            return False
+        return any(
+            keyword in primary or keyword in normalized_intents
+            for keyword in ("screenshot", "get_screenshot", "realtime_search", "browser", "web_search")
+        )
+
+    def _should_ingest_graph(self, primary_intent: str, intents: list[str], tools: list[str]) -> bool:
+        if "graphrag_ingest" in tools:
+            return False
+        graph_writing_intents = {"disaster_analysis", "report_generation", "risk_assessment", "task_draft", "knowledge_graph_build"}
+        normalized_intents = {item.lower() for item in intents}
+        if primary_intent.lower() in graph_writing_intents or normalized_intents.intersection(graph_writing_intents):
+            return any(tool in tools for tool in ("document", "graphrag", "browser", "risk_assessment", "report"))
+        return False
+
 
 def _router_system_prompt() -> str:
     return (
@@ -394,5 +434,7 @@ def _router_system_prompt() -> str:
         "你需要判断用户本轮输入是否需要调用工具，以及工具调用顺序。"
         "必须遵守：灾害分析先 task_draft 并 need_user_confirm=true；用户确认前不能 risk_assessment。"
         "普通问答可以 tools=[]。工具只能从 available_tools 中选择。"
+        "如果用户只是要求网页搜索、最新信息或截图，tools 只能包含 browser，不要调用 graphrag_ingest。"
+        "只有灾害分析、报告生成、风险评估、任务建档或用户明确要求构建知识图谱时，才允许调用 graphrag_ingest。"
         "JSON 字段：primary_intent, intents, tools, next_step, need_user_confirm, confidence, reason, signals。"
     )

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +30,11 @@ class PlaywrightScreenshotter:
         self.playwright_factory = playwright_factory
 
     def capture(self, url: str, query: str | None = None) -> dict[str, Any]:
+        if sys.platform.startswith("win"):
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            except Exception:
+                pass
         self._validate_url(url)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = self.output_dir / self._filename_for(url)
@@ -37,8 +44,12 @@ class PlaywrightScreenshotter:
             browser = playwright.chromium.launch(headless=self.headless)
             try:
                 page = browser.new_page(viewport=self.viewport)
-                page.goto(url, wait_until="networkidle", timeout=self.timeout_ms)
+                response = page.goto(url, wait_until="networkidle", timeout=self.timeout_ms)
                 title = page.title()
+                try:
+                    body_text = page.locator("body").inner_text(timeout=2_000)[:2000]
+                except Exception:
+                    body_text = ""
                 page.screenshot(path=str(screenshot_path), full_page=self.full_page)
             finally:
                 if browser:
@@ -48,6 +59,8 @@ class PlaywrightScreenshotter:
             "path": str(screenshot_path),
             "url": url,
             "title": title,
+            "status_code": response.status if response else None,
+            "body_text": body_text,
             "description": self._build_description(title, url, query),
         }
 

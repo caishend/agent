@@ -9,6 +9,9 @@ export const uploadFile  = (id, form) => http.post(`/tasks/${id}/upload`, form, 
 })
 export const runAgentMessage = (id, data) => http.post(`/tasks/${id}/agent/message`, data)
 export const getChatHistory = (id) => http.get(`/tasks/${id}/chat`)
+export const getTaskDocuments = (id) => http.get(`/tasks/${id}/documents`)
+export const deleteTaskDocument = (taskId, docId) => http.delete(`/tasks/${taskId}/documents/${docId}`)
+export const deleteTaskDocumentByPath = (taskId, filePath) => http.post(`/tasks/${taskId}/documents/delete-path`, { file_path: filePath })
 export async function streamAgentMessage(id, data, onEvent) {
   const token = localStorage.getItem('token')
   const response = await fetch(`/api/tasks/${id}/agent/stream`, {
@@ -48,8 +51,12 @@ export async function streamAgentMessage(id, data, onEvent) {
 }
 export const confirmDraft = (id, data) => http.post(`/tasks/${id}/agent/confirm-draft`, data)
 export const getAgentSession = (id) => http.get(`/tasks/${id}/agent/session`)
+export const saveAgentRecord = (id, content) => http.post(`/tasks/${id}/agent/record`, { content })
 export const clearAgentSession = (id) => http.delete(`/tasks/${id}/agent/session`)
 export const runTool = (id, toolName, data) => http.post(`/tasks/${id}/tools/${toolName}`, data)
 export const getAnalysis = (id)     => http.get(`/tasks/${id}/analysis`)
 export const getReport   = (id)     => http.get(`/tasks/${id}/report`, { responseType: 'blob' })
 export const sendReport  = (id, data) => http.post(`/tasks/${id}/report/send`, data)
+export const getOverviewSummary = (params = {}) => http.get('/overview/summary', { params })
+export const getChinaGeoJson = () => http.get('/overview/china-geojson')
+export const getPopulationHeatmap = () => http.get('/overview/population-heatmap')

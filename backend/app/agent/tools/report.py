@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.agent.llm import complete_llm_json, is_llm_configured
 from app.agent.tools.base_tool import ArtifactItem, BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 from app.config import settings
 
@@ -100,7 +101,7 @@ class ReportTool(BaseTool):
         if not suggestions:
             suggestions = ["请结合现场核验、气象更新和应急部门要求，对本报告结论进行复核后再执行。"]
 
-        return {
+        payload = {
             "title": title,
             "task_id": task_id,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -117,6 +118,62 @@ class ReportTool(BaseTool):
             "artifacts": self._collect_artifacts(params),
             "references": self._as_list(params.get("references")),
         }
+        return self._enhance_payload_with_llm(payload, params, tool_input)
+
+    def _enhance_payload_with_llm(self, payload: dict[str, Any], params: dict[str, Any], tool_input: ToolInput) -> dict[str, Any]:
+        if not is_llm_configured():
+            return payload
+        source = {
+            "user_request": tool_input.query,
+            "conversation_record": params.get("summary") or "",
+            "documents": self._compact_documents(params.get("documents")),
+            "risk_assessment": params.get("risk_assessment") or {},
+            "evidence": self._collect_evidence(params)[:12],
+            "artifacts": self._collect_artifacts(params),
+        }
+        try:
+            report = complete_llm_json(
+                self._report_system_prompt(),
+                json.dumps(source, ensure_ascii=False, default=str)[:26000],
+                temperature=0.15,
+                timeout=90,
+            )
+        except Exception:
+            return payload
+
+        payload["title"] = str(report.get("title") or payload["title"])
+        payload["summary"] = str(report.get("summary") or payload["summary"])
+        payload["known_info"] = self._as_list(report.get("known_info") or payload["known_info"])
+        payload["missing_info"] = self._as_list(report.get("missing_info") or payload["missing_info"])
+        payload["reasons"] = self._as_list(report.get("risk_analysis") or report.get("reasons") or payload["reasons"])
+        payload["suggestions"] = self._as_list(report.get("suggestions") or payload["suggestions"])
+        payload["references"] = self._as_list(report.get("references") or payload["references"])
+        payload["disaster_type"] = str(report.get("disaster_type") or payload["disaster_type"])
+        payload["location"] = str(report.get("location") or payload["location"])
+        if report.get("risk_level"):
+            payload["risk_level"] = str(report["risk_level"])
+        return payload
+
+    def _report_system_prompt(self) -> str:
+        return (
+            "你是应急管理灾害分析报告撰写专家，只输出 JSON。"
+            "请基于用户保存的对话记录、上传文档、搜索证据、截图和风险评估，综合提炼一份专业灾害分析报告内容。"
+            "不要逐字粘贴原始对话；必须去重、归纳、合并同类项。"
+            "不确定的信息放入 missing_info，不要编造。"
+            "JSON 字段：title, disaster_type, location, risk_level, summary, known_info, missing_info, risk_analysis, suggestions, references。"
+        )
+
+    def _compact_documents(self, documents: Any) -> list[dict[str, str]]:
+        compact = []
+        for item in self._as_list(documents)[:12]:
+            item_dict = self._as_dict(item)
+            compact.append(
+                {
+                    "source": str(item_dict.get("source") or item_dict.get("filename") or "文档"),
+                    "content": str(item_dict.get("content") or "")[:1800],
+                }
+            )
+        return compact
 
     def _write_pdf(self, output_path: Path, payload: dict[str, Any]) -> None:
         from reportlab.lib import colors
@@ -348,18 +405,17 @@ class ReportTool(BaseTool):
             story.append(Paragraph("暂无证据链。", normal))
             return
 
-        rows = [[Paragraph("来源", normal), Paragraph("类型", normal), Paragraph("内容", normal), Paragraph("置信度", normal)]]
+        rows = [[Paragraph("来源", normal), Paragraph("类型", normal), Paragraph("内容", normal)]]
         for item in evidence:
             rows.append(
                 [
                     Paragraph(self._escape(str(item.get("source", "-"))), normal),
                     Paragraph(self._escape(str(item.get("type", "-"))), normal),
                     Paragraph(self._escape(str(item.get("content", "-"))[:500]), normal),
-                    Paragraph(self._escape(self._format_confidence(item.get("confidence"))), normal),
                 ]
             )
 
-        table = Table(rows, colWidths=[80, 80, 230, 60], repeatRows=1)
+        table = Table(rows, colWidths=[100, 90, 260], repeatRows=1)
         table.setStyle(
             TableStyle(
                 [
@@ -408,8 +464,7 @@ class ReportTool(BaseTool):
         for index, item in enumerate(evidence, start=1):
             source = item.get("source", "-")
             content = str(item.get("content", "-"))[:500]
-            confidence = self._format_confidence(item.get("confidence"))
-            lines.append(f"{index}. 来源：{source}；置信度：{confidence}；内容：{content}")
+            lines.append(f"{index}. 来源：{source}；内容：{content}")
         return lines
 
     def _artifact_lines(self, artifacts: list[dict[str, Any]]) -> list[str]:
@@ -573,12 +628,6 @@ class ReportTool(BaseTool):
         if payload.get("risk_score") is None:
             return str(payload["risk_level"])
         return f"{payload['risk_level']} / {payload['risk_score']}"
-
-    def _format_confidence(self, value: Any) -> str:
-        try:
-            return f"{float(value):.2f}"
-        except (TypeError, ValueError):
-            return "-"
 
     def _as_dict(self, value: Any) -> dict[str, Any]:
         if value is None:

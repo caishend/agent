@@ -30,7 +30,7 @@ class FakeScreenshotter:
         return {
             "path": "data/screenshots/warning.png",
             "url": url,
-            "description": "截图中包含暴雨红色预警地图",
+            "description": "截图中包含暴雨红色预警地图。",
         }
 
 
@@ -106,7 +106,11 @@ class BrowserToolTest(unittest.TestCase):
             def capture(self, url, query=None):
                 raise NotImplementedError()
 
-        result = self.tool.run(
+        class BrowserToolWithoutSelenium(BrowserTool):
+            def _selenium_screenshotter(self):
+                raise RuntimeError("selenium unavailable")
+
+        result = BrowserToolWithoutSelenium().run(
             ToolInput(
                 query="搜索成都今天暴雨预警并截图",
                 params={
@@ -121,7 +125,7 @@ class BrowserToolTest(unittest.TestCase):
         self.assertEqual(result.data["search_mode"], "langchain_search_tool")
         self.assertEqual(len(result.evidence), 2)
         self.assertEqual(result.artifacts, [])
-        self.assertIn("截图失败", result.data["screenshot_observations"][0])
+        self.assertIn("截图失败", "；".join(result.data["screenshot_observations"]))
 
     def test_falls_back_to_offline_search_hint(self):
         class BrowserToolWithoutDefaultSearch(BrowserTool):

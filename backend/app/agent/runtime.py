@@ -10,6 +10,7 @@ from app.agent.tools.browser import BrowserTool
 from app.agent.tools.document import DocumentTool
 from app.agent.tools.email import EmailTool
 from app.agent.tools.graphrag import GraphRAGTool
+from app.agent.tools.graphrag_ingest import GraphRAGIngestTool
 from app.agent.tools.intent_router import IntentRouterTool
 from app.agent.tools.memory import MemoryTool
 from app.agent.tools.remote_sensing import RemoteSensingTool
@@ -37,6 +38,7 @@ session_store = AgentSessionStore()
 def tool_registry() -> dict[str, BaseTool]:
     return {
         "graphrag": GraphRAGTool(),
+        "graphrag_ingest": GraphRAGIngestTool(),
         "browser": BrowserTool(),
         "document": DocumentTool(),
         "remote_sensing": RemoteSensingTool(),
@@ -116,7 +118,11 @@ def iter_agent_events(
     yield {"type": "thinking", "content": "正在识别意图并规划工具调用..."}
     router_result = IntentRouterTool().run(tool_input, context)
     tools_to_run = router_result.data.get("tools", [])
-    yield {"type": "intent", "content": router_result.summary, "data": router_result.data}
+    tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
+    tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
+    router_data = dict(router_result.data or {})
+    router_data["tools"] = tools_to_run
+    yield {"type": "intent", "content": _router_summary(router_data), "data": router_data}
 
     results: dict[str, ToolResult] = {}
     for tool_name in tools_to_run:
@@ -131,6 +137,25 @@ def iter_agent_events(
                 "type": "tool_result",
                 "tool": tool_name,
                 "content": f"工具调用失败：{error}",
+                "error": str(error),
+            }
+
+    if _needs_web_search_fallback(results) and "browser" not in results:
+        yield {
+            "type": "tool_call",
+            "tool": "browser",
+            "content": "文档和图谱未检索到足够信息，正在联网搜索兜底...",
+        }
+        try:
+            result = call_tool("browser", tool_input, context)
+            results["browser"] = result
+            _update_session_from_result("browser", result, metadata)
+            yield _tool_result_event("browser", result)
+        except Exception as error:
+            yield {
+                "type": "tool_result",
+                "tool": "browser",
+                "content": f"联网搜索兜底失败：{error}",
                 "error": str(error),
             }
 
@@ -194,6 +219,8 @@ def _prepare_tool_input(
             params["confirmed"] = True
     if tool_name == "graphrag" and "documents" not in params and metadata.get("documents"):
         params["documents"] = metadata["documents"]
+    if tool_name == "graphrag_ingest":
+        params.setdefault("ingest_scope", "task")
     if tool_name == "risk_assessment" and "formal_memory" not in params and metadata.get("formal_memory"):
         params["formal_memory"] = metadata["formal_memory"]
     if tool_name == "report":
@@ -219,6 +246,61 @@ def _prepare_tool_input(
     return ToolInput(query=tool_input.query, files=tool_input.files, params=params)
 
 
+def _ensure_document_rag_fallback(tools: list[str], tool_input: ToolInput) -> list[str]:
+    if not _has_document_file(tool_input.files):
+        return tools
+    query = tool_input.query or ""
+    needs_text_retrieval = any(keyword in query for keyword in ("什么时候", "时间", "发生", "哪里", "原因", "影响", "风险", "暴雨", "灾害"))
+    if not needs_text_retrieval:
+        return tools
+
+    planned = list(tools or [])
+    if "document" not in planned:
+        planned.insert(0, "document")
+    if "graphrag" not in planned:
+        document_index = planned.index("document")
+        planned.insert(document_index + 1, "graphrag")
+    elif planned.index("graphrag") < planned.index("document"):
+        planned.remove("graphrag")
+        planned.insert(planned.index("document") + 1, "graphrag")
+    return list(dict.fromkeys(planned))
+
+
+def _sanitize_tools_for_request(tools: list[str], query: str) -> list[str]:
+    normalized_query = (query or "").lower()
+    screenshot_or_search = any(keyword in normalized_query for keyword in ("截图", "截屏", "网页图", "页面图", "搜索", "最新", "预警", "screenshot"))
+    analysis_or_report = any(keyword in normalized_query for keyword in ("灾害分析", "风险评估", "生成报告", "报告", "建档", "知识图谱", "构建图谱"))
+    if screenshot_or_search and not analysis_or_report:
+        return [tool for tool in tools if tool == "browser"] or ["browser"]
+    return tools
+
+
+def _router_summary(router_data: dict[str, Any]) -> str:
+    tools = router_data.get("tools") or []
+    return (
+        f"意图识别来源：{router_data.get('router_source', 'unknown')}；"
+        f"主意图：{router_data.get('primary_intent')}；"
+        f"工具链：{', '.join(tools) if tools else '无'}；"
+        f"下一步：{router_data.get('next_step', 'answer')}。{router_data.get('reason', '')}"
+    )
+
+
+def _has_document_file(files: list[dict[str, Any]]) -> bool:
+    document_extensions = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".md"}
+    for file_info in files or []:
+        name = str(file_info.get("name") or file_info.get("filename") or file_info.get("path") or "")
+        if any(name.lower().endswith(extension) for extension in document_extensions):
+            return True
+    return False
+
+
+def _needs_web_search_fallback(results: dict[str, ToolResult]) -> bool:
+    graphrag_result = results.get("graphrag")
+    if not graphrag_result:
+        return False
+    return bool(graphrag_result.data.get("needs_web_search"))
+
+
 def _update_session_from_result(
     tool_name: str,
     result: ToolResult,
@@ -237,6 +319,13 @@ def _update_session_from_result(
         metadata["confirmed_task"] = True
     if tool_name == "risk_assessment" and result.data.get("assessment"):
         metadata["risk_assessment"] = result.data["assessment"]
+    if tool_name == "graphrag_ingest" and result.data.get("entities"):
+        metadata["knowledge_graph"] = {
+            "task_id": result.data.get("task_id"),
+            "entities": result.data.get("entities", []),
+            "relations": result.data.get("relations", []),
+        }
+        metadata["neo4j_ingest_status"] = result.data.get("neo4j", {})
     if tool_name == "report" and result.data.get("report_path"):
         metadata["last_report_path"] = result.data["report_path"]
 

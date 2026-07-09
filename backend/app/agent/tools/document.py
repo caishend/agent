@@ -86,9 +86,9 @@ class DocumentTool(BaseTool):
         if not file_path.exists():
             return []
         loader = self._create_langchain_loader(file_path)
-        if not loader:
-            return []
-        raw_documents = self._load_with_langchain(loader)
+        raw_documents = self._load_with_langchain(loader) if loader else []
+        if not raw_documents:
+            return self._load_file_with_fallback(file_path, file_name)
         documents = []
         for document in raw_documents:
             normalized = self._normalize_document(document)
@@ -96,6 +96,31 @@ class DocumentTool(BaseTool):
             normalized["metadata"].setdefault("source", file_name)
             documents.append(normalized)
         return documents
+
+    def _load_file_with_fallback(self, file_path: Path, file_name: str) -> list[dict[str, Any]]:
+        extension = file_path.suffix.lower()
+        try:
+            if extension == ".docx":
+                from docx import Document as DocxDocument
+
+                doc = DocxDocument(str(file_path))
+                paragraphs = [paragraph.text.strip() for paragraph in doc.paragraphs if paragraph.text.strip()]
+                table_lines = []
+                for table in doc.tables:
+                    for row in table.rows:
+                        values = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if values:
+                            table_lines.append(" | ".join(values))
+                content = "\n".join([*paragraphs, *table_lines]).strip()
+                if content:
+                    return [{"content": content, "metadata": {"source": file_name, "path": str(file_path)}}]
+            if extension in self.text_extensions:
+                content = file_path.read_text(encoding="utf-8", errors="ignore").strip()
+                if content:
+                    return [{"content": content, "metadata": {"source": file_name, "path": str(file_path)}}]
+        except Exception:
+            return []
+        return []
 
     def _create_langchain_loader(self, file_path: Path) -> Any | None:
         extension = file_path.suffix.lower()

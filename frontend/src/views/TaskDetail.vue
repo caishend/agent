@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <AppShell>
     <div class="simple-workbench">
       <header class="simple-chat-header">
@@ -19,30 +19,34 @@
           <div class="avatar">{{ item.role === 'user' ? '你' : 'SG' }}</div>
           <div class="bubble">
             <div class="message-meta">{{ item.title }}</div>
-
-            <div
-              v-if="item.role === 'agent'"
-              class="message-content markdown-body"
-              v-html="renderMarkdown(item.content)"
-            />
-            <div v-else class="message-content">{{ item.content }}</div>
-
-            <details v-if="item.progress?.length" class="trace-panel" open>
-              <summary>已规划任务、调用工具、生成结果 · {{ item.progress.length }} 步</summary>
+            <div v-if="item.role === 'agent' && item.requestText" class="current-request">
+              <span>本轮请求</span>
+              <strong>{{ item.requestText }}</strong>
+            </div>
+            <details v-if="item.progress?.length" class="trace-panel" :open="item.traceOpen !== false">
+              <summary>
+                <span>执行轨迹</span>
+                <small>{{ latestProgress(item.progress) }}</small>
+              </summary>
               <div class="progress-list">
                 <div v-for="(step, index) in item.progress" :key="index" class="progress-step">
-                  <span class="progress-dot">{{ index + 1 }}</span>
+                  <span class="progress-dot">{{ progressIcon(step, index, item.progress.length) }}</span>
                   <span>{{ step }}</span>
                 </div>
               </div>
             </details>
 
-            <div v-if="item.artifacts?.length" class="artifact-panel">
-              <div v-for="artifact in item.artifacts" :key="artifact.path" class="artifact-card">
-                <div class="artifact-title">浏览器真实截图 · Playwright</div>
+            <div v-if="item.role === 'agent'" class="message-content markdown-body" v-html="renderMarkdown(item.content)" />
+            <div v-else class="message-content">{{ item.content }}</div>
+
+            <div v-if="displayArtifacts(item.artifacts).length" class="artifact-panel">
+              <div v-for="artifact in displayArtifacts(item.artifacts)" :key="artifact.path" class="artifact-card">
+                <div class="artifact-title">
+                  {{ artifact.type === 'screenshot' ? '浏览器真实截图' : artifact.type === 'report' ? '分析报告已生成' : '工具产物' }}
+                </div>
                 <a :href="artifactUrl(artifact)" target="_blank" rel="noreferrer">
                   <img v-if="artifact.type === 'screenshot'" :src="artifactUrl(artifact)" alt="网页截图" />
-                  <span v-else>{{ artifact.path }}</span>
+                  <span v-else>{{ artifactName(artifact) }}</span>
                 </a>
                 <small>{{ artifact.metadata?.url || artifact.path }}</small>
               </div>
@@ -101,6 +105,10 @@
             <button class="solid-button inline" @click="saveRecord">保存</button>
           </div>
           <small v-if="recordSavedAt">已保存 {{ recordSavedAt }}</small>
+          <details v-if="conversationRecord.trim()" class="record-preview">
+            <summary>预览保存内容</summary>
+            <div class="markdown-body" v-html="renderMarkdown(conversationRecord)" />
+          </details>
         </section>
 
         <section class="upload-card">
@@ -111,8 +119,11 @@
           </label>
           <div class="uploaded-list">
             <div v-for="file in uploadedFiles" :key="file.file_path" class="uploaded-item">
-              <strong>{{ file.filename }}</strong>
-              <small>{{ file.file_type }}</small>
+              <a :href="fileUrl(file)" target="_blank" rel="noreferrer">
+                <strong>{{ file.filename }}</strong>
+                <small>{{ file.file_type }} · 点击预览/下载</small>
+              </a>
+              <button class="doc-delete-button" type="button" @click="removeDocument(file)">删除</button>
             </div>
           </div>
         </section>
@@ -128,13 +139,7 @@
               <span>💬</span>
               <span><strong>自动判断</strong><small>由 LLM 判断是否调用工具</small></span>
             </button>
-            <button
-              v-for="tool in toolOptions"
-              :key="tool.value"
-              type="button"
-              class="tool-option"
-              @click="chooseTool(tool)"
-            >
+            <button v-for="tool in toolOptions" :key="tool.value" type="button" class="tool-option" @click="chooseTool(tool)">
               <span>{{ tool.icon }}</span>
               <span><strong>{{ tool.label }}</strong><small>{{ tool.desc }}</small></span>
             </button>
@@ -147,9 +152,7 @@
           :placeholder="selectedTool ? selectedTool.placeholder : '例如：搜索成都暴雨最新预警并截图'"
           @keydown.enter.exact.prevent="runAgent"
         />
-        <button class="send-button" :disabled="loading || !message.trim()">
-          {{ loading ? '…' : '→' }}
-        </button>
+        <button class="send-button" :disabled="loading || !message.trim()">{{ loading ? '…' : '→' }}</button>
       </form>
     </div>
   </AppShell>
@@ -164,9 +167,13 @@ import AppShell from '../components/AppShell.vue'
 import {
   clearAgentSession,
   confirmDraft,
+  deleteTaskDocument,
+  deleteTaskDocumentByPath,
   getAgentSession,
   getChatHistory,
+  getTaskDocuments,
   getTask,
+  saveAgentRecord,
   streamAgentMessage,
   uploadFile
 } from '../api/task'
@@ -210,20 +217,87 @@ async function loadTaskState() {
   selectedTool.value = null
   toolMenuOpen.value = false
   await refreshSession()
+  await loadUploadedDocuments()
   await loadChatHistory()
-  conversationRecord.value = localStorage.getItem(recordKey.value) || ''
+  conversationRecord.value = session.value.conversation_record || localStorage.getItem(recordKey.value) || ''
   recordSavedAt.value = ''
+}
+
+async function loadUploadedDocuments() {
+  uploadedFiles.value = await getTaskDocuments(taskId.value)
 }
 
 async function loadChatHistory() {
   const history = await getChatHistory(taskId.value)
-  messages.value = history.map(item => ({
-    id: `db-${item.conv_id}`,
-    role: item.role === 'user' ? 'user' : 'agent',
-    title: item.role === 'user' ? '用户' : 'Agent',
-    content: item.content
-  }))
+  const restored = []
+  let pendingTrace = null
+
+  for (const item of history) {
+    if (item.role === 'tool') {
+      const parsedTrace = parseTraceRecord(item.content)
+      if (parsedTrace) pendingTrace = parsedTrace
+      continue
+    }
+
+    if (item.role === 'assistant') {
+      restored.push({
+        id: `db-${item.conv_id}`,
+        role: 'agent',
+        title: 'Agent',
+        content: item.content,
+        requestText: pendingTrace?.requestText,
+        progress: pendingTrace?.progress || [],
+        searchResults: pendingTrace?.searchResults || [],
+        artifacts: pendingTrace?.artifacts || [],
+        data: pendingTrace?.data,
+        traceOpen: false
+      })
+      pendingTrace = null
+      continue
+    }
+
+    restored.push({
+      id: `db-${item.conv_id}`,
+      role: 'user',
+      title: '用户',
+      content: item.content
+    })
+  }
+
+  if (pendingTrace) {
+    restored.push({
+      id: `trace-${crypto.randomUUID()}`,
+      role: 'agent',
+      title: 'Agent · 执行轨迹',
+      content: '本轮执行轨迹已恢复；如果没有最终回答，可能是页面刷新或请求中断导致。',
+      requestText: pendingTrace.requestText,
+      progress: pendingTrace.progress || [],
+      searchResults: pendingTrace.searchResults || [],
+      artifacts: pendingTrace.artifacts || [],
+      data: pendingTrace.data,
+      traceOpen: true
+    })
+  }
+
+  messages.value = restored
+  syncArtifactsToRelatedFiles(restored)
   await scrollToBottom()
+}
+
+function parseTraceRecord(content) {
+  try {
+    const parsed = JSON.parse(content || '{}')
+    if (parsed?.kind !== 'agent_trace') return null
+    return {
+      requestText: parsed.requestText || '',
+      progress: Array.isArray(parsed.progress) ? parsed.progress : [],
+      searchResults: Array.isArray(parsed.searchResults) ? parsed.searchResults : [],
+      artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
+      data: parsed.data || null
+    }
+  } catch {
+    return null
+  }
 }
 
 async function runAgent() {
@@ -237,6 +311,7 @@ async function runAgent() {
     title: currentTool ? `用户 · ${currentTool.label}` : '用户',
     content: text
   })
+  await scrollToBottom()
 
   message.value = ''
   toolMenuOpen.value = false
@@ -247,7 +322,8 @@ async function runAgent() {
     title: 'Agent · 执行中',
     content: '正在准备...',
     requestText: text,
-    progress: [],
+    progress: ['请求已发送，等待后端开始流式响应...'],
+    traceOpen: true,
     searchResults: [],
     artifacts: []
   }
@@ -255,12 +331,11 @@ async function runAgent() {
   await scrollToBottom()
 
   try {
-    const files = currentFilePayload()
     const params = {
       conversation_record: conversationRecord.value,
       ...(currentTool ? { forced_tool: currentTool.value } : {})
     }
-    await streamAgentMessage(taskId.value, { message: text, files, params }, event => {
+    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(), params }, event => {
       handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
@@ -318,8 +393,13 @@ function handleStreamEvent(event, progressMessage) {
     if (event.tool === 'browser' && event.data?.search_results?.length) {
       progressMessage.searchResults = event.data.search_results
     }
+    if (event.tool === 'browser' && event.data?.screenshot_observations?.length) {
+      progressMessage.progress.push(...event.data.screenshot_observations)
+    }
     if (event.artifacts?.length) {
       progressMessage.artifacts = [...(progressMessage.artifacts || []), ...event.artifacts]
+      addArtifactsToRelatedFiles(event.artifacts)
+      if (event.artifacts.some(artifact => artifact.type === 'report')) loadUploadedDocuments()
     }
     if (event.need_user_confirm && event.data?.draft) {
       messages.value.push({
@@ -338,6 +418,7 @@ function handleStreamEvent(event, progressMessage) {
 
   if (event.type === 'answer') {
     progressMessage.title = 'Agent'
+    progressMessage.traceOpen = false
     finishTyping(progressMessage, event.content || progressMessage.content || '已完成。')
     scrollToBottom()
     return
@@ -352,19 +433,6 @@ function handleStreamEvent(event, progressMessage) {
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = event.content || event.error || '调用失败。'
   }
-}
-
-async function confirmDraftFromMessage(item) {
-  if (!item.draft) return
-  const result = await confirmDraft(taskId.value, { draft: item.draft })
-  session.value.formal_memory = result.data.formal_memory
-  item.needConfirm = false
-  messages.value.push({
-    id: crypto.randomUUID(),
-    role: 'agent',
-    title: 'Agent · 已确认',
-    content: '已写入正式任务记忆。后续可以继续要求风险评估、生成报告或邮件发送。'
-  })
 }
 
 async function chooseReportFormat(item, format) {
@@ -383,7 +451,9 @@ async function chooseReportFormat(item, format) {
     role: 'agent',
     title: 'Agent · 生成报告中',
     content: `已选择 ${format === 'docx' ? 'Word' : 'PDF'}，正在生成灾害分析报告...`,
-    progress: [],
+    requestText: item.requestText || conversationRecord.value || '继续生成灾害分析报告',
+    progress: ['已选择报告格式，等待后端继续执行...'],
+    traceOpen: true,
     searchResults: [],
     artifacts: []
   }
@@ -391,15 +461,14 @@ async function chooseReportFormat(item, format) {
   await scrollToBottom()
 
   try {
-    const params = {
-      conversation_record: conversationRecord.value,
-      report_format: format,
-      format
-    }
     await streamAgentMessage(taskId.value, {
       message: format === 'docx' ? 'Word' : 'PDF',
       files: currentFilePayload(),
-      params
+      params: {
+        conversation_record: conversationRecord.value,
+        report_format: format,
+        format
+      }
     }, event => handleStreamEvent(event, progressMessage))
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
@@ -408,6 +477,19 @@ async function chooseReportFormat(item, format) {
     loading.value = false
     await scrollToBottom()
   }
+}
+
+async function confirmDraftFromMessage(item) {
+  if (!item.draft) return
+  const result = await confirmDraft(taskId.value, { draft: item.draft })
+  session.value.formal_memory = result.data.formal_memory
+  item.needConfirm = false
+  messages.value.push({
+    id: crypto.randomUUID(),
+    role: 'agent',
+    title: 'Agent · 已确认',
+    content: '已写入正式任务记忆。后续可以继续要求风险评估、生成报告或邮件发送。'
+  })
 }
 
 async function upload(event) {
@@ -424,6 +506,15 @@ async function upload(event) {
     content: `已接入 **${uploaded.filename}**，后续研究、灾害分析和报告都会自动带上该文件。`
   })
   event.target.value = ''
+}
+
+async function removeDocument(file) {
+  if (file.doc_id) {
+    await deleteTaskDocument(taskId.value, file.doc_id)
+  } else if (file.file_path) {
+    await deleteTaskDocumentByPath(taskId.value, file.file_path)
+  }
+  uploadedFiles.value = uploadedFiles.value.filter(item => item !== file && item.file_path !== file.file_path)
 }
 
 async function refreshSession() {
@@ -447,12 +538,44 @@ function chooseTool(tool) {
 
 function generateRecord() {
   conversationRecord.value = messages.value
-    .map(item => `${item.title}：${item.content}`)
-    .join('\n\n')
+    .filter(item => item.role === 'user' || item.role === 'agent')
+    .map(formatRecordItem)
+    .filter(Boolean)
+    .join('\n\n---\n\n')
 }
 
-function saveRecord() {
+function formatRecordItem(item) {
+  const lines = [`## ${item.title || (item.role === 'user' ? '用户' : 'Agent')}`]
+  if (item.requestText) lines.push(`**本轮请求：** ${item.requestText}`)
+  if (item.content) lines.push(item.content)
+  if (item.artifacts?.length) {
+    lines.push('', '**相关图片/产物：**')
+    for (const artifact of item.artifacts) {
+      const url = artifactUrl(artifact)
+      const name = artifactName(artifact)
+      if (artifact.type === 'screenshot') {
+        lines.push(`![${name}](${url})`)
+        if (artifact.metadata?.url) lines.push(`来源网页：${artifact.metadata.url}`)
+      } else {
+        lines.push(`- [${name}](${url})`)
+      }
+    }
+  }
+  if (item.searchResults?.length) {
+    lines.push('', '**搜索来源：**')
+    for (const result of item.searchResults.slice(0, 5)) {
+      const title = result.title || result.name || result.url || '搜索结果'
+      const snippet = result.content || result.snippet || result.summary || ''
+      lines.push(`- ${result.url ? `[${title}](${result.url})` : title}${snippet ? `：${snippet}` : ''}`)
+    }
+  }
+  return lines.join('\n\n')
+}
+
+async function saveRecord() {
   localStorage.setItem(recordKey.value, conversationRecord.value)
+  await saveAgentRecord(taskId.value, conversationRecord.value)
+  session.value.conversation_record = conversationRecord.value
   recordSavedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
@@ -467,16 +590,58 @@ function compactSearchSummary(results) {
   return `${title}${text ? `：${text.slice(0, 42)}...` : ''}`
 }
 
+function latestProgress(progress = []) {
+  const latest = progress[progress.length - 1] || '等待执行'
+  return latest.length > 42 ? `${latest.slice(0, 42)}...` : latest
+}
+
+function progressIcon(step, index, total) {
+  if (index === total - 1) return '●'
+  if (String(step).includes('失败')) return '!'
+  return '✓'
+}
+
 function artifactUrl(artifact) {
   const normalized = String(artifact.path || '').replaceAll('\\', '/')
   const filename = normalized.split('/').pop()
-  if (artifact.type === 'screenshot' && filename) {
-    return `/artifacts/screenshots/${filename}`
-  }
-  if (artifact.type === 'report' && filename) {
-    return `/artifacts/reports/${filename}`
-  }
+  if (artifact.type === 'screenshot' && filename) return `/artifacts/screenshots/${filename}`
+  if (artifact.type === 'report' && filename) return `/artifacts/reports/${filename}`
   return normalized
+}
+
+function artifactName(artifact) {
+  const normalized = String(artifact.path || '').replaceAll('\\', '/')
+  return normalized.split('/').pop() || normalized || '打开产物'
+}
+
+function displayArtifacts(artifacts = []) {
+  return (artifacts || []).filter(artifact => artifact.type !== 'report_metadata')
+}
+
+function fileUrl(file) {
+  if (file.artifact) return artifactUrl(file.artifact)
+  const normalized = String(file.file_path || '').replaceAll('\\', '/')
+  if (normalized.startsWith('data/uploads/')) return `/artifacts/uploads/${normalized.slice('data/uploads/'.length)}`
+  if (normalized.startsWith('data/reports/')) return `/artifacts/reports/${normalized.split('/').pop()}`
+  return normalized.startsWith('/artifacts/') ? normalized : normalized
+}
+
+function syncArtifactsToRelatedFiles(items) {
+  for (const item of items) addArtifactsToRelatedFiles(item.artifacts || [])
+}
+
+function addArtifactsToRelatedFiles(artifacts = []) {
+  for (const artifact of artifacts) {
+    if (artifact.type !== 'report') continue
+    const path = String(artifact.path || '')
+    if (!path || uploadedFiles.value.some(file => file.file_path === path)) continue
+    uploadedFiles.value.push({
+      filename: artifactName(artifact),
+      file_type: (artifact.metadata?.format || path.split('.').pop() || 'REPORT').toUpperCase(),
+      file_path: path,
+      artifact
+    })
+  }
 }
 
 function currentFilePayload() {
@@ -530,18 +695,14 @@ function finishTyping(messageItem, finalContent) {
 
 function cleanupTyping(messageItem) {
   const state = typingState.get(messageItem.id)
-  if (state?.timer) {
-    window.clearInterval(state.timer)
-  }
+  if (state?.timer) window.clearInterval(state.timer)
   typingState.delete(messageItem.id)
   delete messageItem.streamingAnswerStarted
 }
 
 async function scrollToBottom() {
   await nextTick()
-  if (messagePanel.value) {
-    messagePanel.value.scrollTop = messagePanel.value.scrollHeight
-  }
+  if (messagePanel.value) messagePanel.value.scrollTop = messagePanel.value.scrollHeight
 }
 
 function pretty(value) {
@@ -549,3 +710,4 @@ function pretty(value) {
   return JSON.stringify(value, null, 2)
 }
 </script>
+

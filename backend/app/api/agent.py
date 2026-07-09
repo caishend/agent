@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,8 +12,9 @@ from starlette.responses import StreamingResponse
 
 from app.agent.runtime import call_tool, confirm_task_draft, iter_agent_events, run_agent_once, session_store
 from app.agent.tools.base_tool import ToolContext, ToolInput
+from app.api.overview import sync_event_from_agent_session
 from app.db import get_db
-from app.models.conversation import Conversation
+from app.models.conversation import Conversation, Document
 from app.models.task import Task
 from app.utils import get_current_user_id
 
@@ -36,6 +38,10 @@ class ToolRunIn(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class ConversationRecordIn(BaseModel):
+    content: str = ""
+
+
 @router.post("/{task_id}/agent/message")
 def run_agent_message(
     task_id: int,
@@ -44,18 +50,20 @@ def run_agent_message(
     db: Session = Depends(get_db),
 ):
     _get_task_or_404(task_id, user_id, db)
+    files = _with_uploaded_documents(db, task_id, data.files)
     _save_message(db, task_id, "user", data.message)
     params = _with_conversation_history(db, task_id, data.params)
     events = run_agent_once(
         task_id=task_id,
         user_id=user_id,
         message=data.message,
-        files=data.files,
+        files=files,
         params=params,
     )
     answer = _last_answer(events)
     if answer:
         _save_message(db, task_id, "assistant", answer)
+        sync_event_from_agent_session(db, task_id, session_store.metadata_for(task_id))
     return {
         "task_id": task_id,
         "events": events,
@@ -72,26 +80,37 @@ def stream_agent_message(
     db: Session = Depends(get_db),
 ):
     _get_task_or_404(task_id, user_id, db)
+    files = _with_uploaded_documents(db, task_id, data.files)
     _save_message(db, task_id, "user", data.message)
     params = _with_conversation_history(db, task_id, data.params)
 
     def event_stream():
         answer = ""
+        trace = _new_trace_record(data.message)
+        trace_row = _create_tool_record(db, task_id, trace)
         try:
             for event in iter_agent_events(
                 task_id=task_id,
                 user_id=user_id,
                 message=data.message,
-                files=data.files,
+                files=files,
                 params=params,
             ):
+                _append_trace_event(trace, event)
+                _update_tool_record(db, trace_row, trace)
                 if event.get("type") == "answer":
                     answer = str(event.get("content") or "")
+                if event.get("type") == "tool_result" and event.get("tool") == "report":
+                    _register_report_artifacts(db, task_id, event.get("artifacts") or [])
                 yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
             if answer:
+                _update_tool_record(db, trace_row, trace)
                 _save_message(db, task_id, "assistant", answer)
+                sync_event_from_agent_session(db, task_id, session_store.metadata_for(task_id))
         except Exception as error:
             payload = {"type": "error", "content": str(error), "error": str(error)}
+            _append_trace_event(trace, payload)
+            _update_tool_record(db, trace_row, trace)
             yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -122,7 +141,23 @@ def get_agent_session(
     db: Session = Depends(get_db),
 ):
     _get_task_or_404(task_id, user_id, db)
-    return {"task_id": task_id, "session": session_store.metadata_for(task_id)}
+    metadata = session_store.metadata_for(task_id)
+    metadata.setdefault("conversation_record", _load_conversation_record(db, task_id))
+    return {"task_id": task_id, "session": metadata}
+
+
+@router.post("/{task_id}/agent/record")
+def save_conversation_record(
+    task_id: int,
+    data: ConversationRecordIn,
+    user_id: int = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    _get_task_or_404(task_id, user_id, db)
+    content = data.content.strip()
+    _save_tool_record(db, task_id, {"kind": "conversation_record", "content": content})
+    session_store.metadata_for(task_id)["conversation_record"] = content
+    return {"task_id": task_id, "conversation_record": content}
 
 
 @router.delete("/{task_id}/agent/session", status_code=204)
@@ -174,11 +209,132 @@ def _save_message(db: Session, task_id: int, role: str, content: str) -> None:
     db.commit()
 
 
+def _register_report_artifacts(db: Session, task_id: int, artifacts: list[dict[str, Any]]) -> None:
+    for artifact in artifacts:
+        if artifact.get("type") != "report":
+            continue
+        path = str(artifact.get("path") or "")
+        if not path:
+            continue
+        filename = Path(path).name
+        file_type = Path(path).suffix.lower().lstrip(".").upper() or "REPORT"
+        exists = db.query(Document).filter(Document.task_id == task_id, Document.file_path == path).first()
+        if exists:
+            continue
+        db.add(Document(task_id=task_id, filename=filename, file_type=file_type, file_path=path))
+    db.commit()
+
+
+def _create_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> Conversation:
+    row = Conversation(task_id=task_id, role="tool", content=json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str))
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _update_tool_record(db: Session, row: Conversation, payload: dict[str, Any]) -> None:
+    try:
+        row.content = json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str)
+        db.add(row)
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _save_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> None:
+    kind = payload.get("kind")
+    if kind == "conversation_record":
+        existing_rows = (
+            db.query(Conversation)
+            .filter(Conversation.task_id == task_id, Conversation.role == "tool")
+            .order_by(Conversation.created_at.desc(), Conversation.conv_id.desc())
+            .all()
+        )
+        for row in existing_rows:
+            try:
+                if json.loads(row.content or "{}").get("kind") == "conversation_record":
+                    row.content = json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str)
+                    db.commit()
+                    return
+            except json.JSONDecodeError:
+                continue
+    _save_message(db, task_id, "tool", json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str))
+
+
+def _compact_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("kind") != "agent_trace":
+        return payload
+
+    progress = [str(item)[:600] for item in (payload.get("progress") or []) if str(item).strip()]
+    artifacts = payload.get("artifacts") or []
+    search_results = []
+    for item in (payload.get("searchResults") or [])[:10]:
+        if not isinstance(item, dict):
+            continue
+        search_results.append(
+            {
+                "title": str(item.get("title") or item.get("name") or "")[:180],
+                "url": item.get("url"),
+                "content": str(item.get("content") or item.get("snippet") or item.get("summary") or "")[:500],
+            }
+        )
+
+    compact = {
+        "kind": "agent_trace",
+        "requestText": str(payload.get("requestText") or "")[:1000],
+        "progress": progress[-80:],
+        "searchResults": search_results,
+        "artifacts": artifacts[-20:] if isinstance(artifacts, list) else [],
+        "data": _summarize_trace_data(payload.get("data")),
+    }
+    return compact
+
+
+def _summarize_trace_data(data: Any) -> Any:
+    if not isinstance(data, dict):
+        return data
+    summary_keys = (
+        "search_mode",
+        "query",
+        "graph_status",
+        "entity_count",
+        "relation_count",
+        "risk_level",
+        "risk_score",
+        "report_path",
+        "document_mode",
+    )
+    summary = {key: data.get(key) for key in summary_keys if key in data}
+    if data.get("screenshot_observations"):
+        summary["screenshot_observations"] = [str(item)[:500] for item in data.get("screenshot_observations", [])[:10]]
+    if data.get("draft"):
+        summary["draft"] = data.get("draft")
+    return summary or None
+
+
+def _load_conversation_record(db: Session, task_id: int) -> str:
+    rows = (
+        db.query(Conversation)
+        .filter(Conversation.task_id == task_id, Conversation.role == "tool")
+        .order_by(Conversation.created_at.desc(), Conversation.conv_id.desc())
+        .all()
+    )
+    for row in rows:
+        try:
+            payload = json.loads(row.content or "{}")
+        except json.JSONDecodeError:
+            continue
+        if payload.get("kind") == "conversation_record":
+            return str(payload.get("content") or "")
+    return ""
+
+
 def _with_conversation_history(db: Session, task_id: int, params: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(params or {})
     rows = (
         db.query(Conversation)
-        .filter(Conversation.task_id == task_id)
+        .filter(Conversation.task_id == task_id, Conversation.role.in_(["user", "assistant"]))
         .order_by(Conversation.created_at.desc(), Conversation.conv_id.desc())
         .limit(12)
         .all()
@@ -194,8 +350,60 @@ def _with_conversation_history(db: Session, task_id: int, params: dict[str, Any]
     return enriched
 
 
+def _with_uploaded_documents(db: Session, task_id: int, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(files or [])
+    seen_paths = {str(item.get("path") or item.get("file_path") or "") for item in merged}
+    rows = db.query(Document).filter(Document.task_id == task_id).order_by(Document.upload_time.desc()).all()
+    for row in rows:
+        if row.file_path in seen_paths:
+            continue
+        merged.append(
+            {
+                "path": row.file_path,
+                "name": row.filename,
+                "filename": row.filename,
+                "type": row.file_type,
+                "doc_id": row.doc_id,
+            }
+        )
+    return merged
+
+
 def _last_answer(events: list[dict[str, Any]]) -> str:
     for event in reversed(events):
         if event.get("type") == "answer":
             return str(event.get("content") or "")
     return ""
+
+
+def _new_trace_record(message: str) -> dict[str, Any]:
+    return {
+        "kind": "agent_trace",
+        "requestText": message,
+        "progress": ["请求已发送，等待后端开始流式响应..."],
+        "searchResults": [],
+        "artifacts": [],
+        "data": None,
+    }
+
+
+def _append_trace_event(trace: dict[str, Any], event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    content = str(event.get("content") or "").strip()
+    if event_type in {"thinking", "intent", "tool_call", "tool_result", "llm_call", "llm_fallback", "error"} and content:
+        trace.setdefault("progress", []).append(content)
+
+    if event_type == "tool_result":
+        tool_name = event.get("tool") or "tool"
+        trace.setdefault("progress", []).append(f"工具 {tool_name} 已完成")
+        if event.get("data"):
+            trace["data"] = event.get("data")
+        if tool_name == "browser" and isinstance(event.get("data"), dict):
+            search_results = event["data"].get("search_results") or []
+            if search_results:
+                trace["searchResults"] = search_results
+            screenshot_observations = event["data"].get("screenshot_observations") or []
+            trace.setdefault("progress", []).extend(str(item) for item in screenshot_observations)
+
+    if event.get("artifacts"):
+        trace.setdefault("artifacts", []).extend(event.get("artifacts") or [])
