@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 油气管道灾害智能检测系统 —— Python 依赖
+#
+# 安装：
+#     pip install -r requirements.txt
+#
+# 说明：
+#   * torch / torchvision 默认安装 CPU 版本。如需 GPU(CUDA) 加速，请先到
+#     https://pytorch.org/get-started/locally/ 选择对应 CUDA 版本的安装命令，
+#     例如： pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+#   * Python 版本建议 3.10 ~ 3.12。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Web 后端 (FastAPI 服务) ──────────────────────────────────────────────────
+fastapi==0.109.0
+uvicorn==0.27.0
+python-multipart==0.0.6          # FastAPI 接收上传文件(UploadFile)所需
+pydantic==2.6.0
+
+# ── 深度学习框架 ──────────────────────────────────────────────────────────────
+torch==2.5.1
+torchvision==0.20.1
+timm==1.0.22                     # ViT-Small backbone
+transformers==4.37.2             # SegFormer 语义分割
+safetensors==0.6.2               # 加载 SegFormer 权重 (model.safetensors)
+ultralytics>=8.3.0               # YOLO11m 目标检测
+
+# ── 图像 / 数值 / 科学计算 ────────────────────────────────────────────────────
+opencv-python==4.11.0.86
+Pillow==11.3.0
+numpy==1.26.4
+pandas==2.2.0
+scikit-learn==1.4.0
+matplotlib==3.9.2
+
+# ── 通用工具 ──────────────────────────────────────────────────────────────────
+tqdm==4.67.1
+PyYAML==6.0.1
