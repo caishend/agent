@@ -1,4 +1,4 @@
-"""Agent 后端接口。"""
+﻿"""Agent 后端接口。"""
 from __future__ import annotations
 
 import json
@@ -13,7 +13,7 @@ from starlette.responses import StreamingResponse
 from app.agent.runtime import call_tool, confirm_task_draft, iter_agent_events, run_agent_once, session_store
 from app.agent.tools.base_tool import ToolContext, ToolInput
 from app.api.overview import sync_event_from_agent_session
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.models.conversation import Conversation, Document
 from app.models.task import Task
 from app.utils import get_current_user_id
@@ -83,12 +83,27 @@ def stream_agent_message(
     files = _with_uploaded_documents(db, task_id, data.files)
     _save_message(db, task_id, "user", data.message)
     params = _with_conversation_history(db, task_id, data.params)
+    assistant_conv_id = _save_message(db, task_id, "assistant", "正在生成回复...")
 
     def event_stream():
-        answer = ""
+        answer_chunks: list[str] = []
+        answer_saved = False
+        done_sent = False
+        last_persisted_length = 0
         trace = _new_trace_record(data.message)
         trace_row = _create_tool_record(db, task_id, trace)
+
+        def current_answer() -> str:
+            return "".join(answer_chunks).strip()
+
+        def persist(content: str, *, force: bool = False) -> None:
+            nonlocal last_persisted_length
+            if force or len(content) - last_persisted_length >= 240:
+                _update_message_in_new_session(assistant_conv_id, content or "正在生成回复...")
+                last_persisted_length = len(content)
+
         try:
+            yield ": connected\r\n\r\n"
             for event in iter_agent_events(
                 task_id=task_id,
                 user_id=user_id,
@@ -98,22 +113,46 @@ def stream_agent_message(
             ):
                 _append_trace_event(trace, event)
                 _update_tool_record(db, trace_row, trace)
+                if event.get("type") == "answer_delta":
+                    answer_chunks.append(str(event.get("content") or ""))
+                    persist(current_answer())
                 if event.get("type") == "answer":
                     answer = str(event.get("content") or "")
+                    if answer:
+                        _update_message_in_new_session(assistant_conv_id, answer)
+                        last_persisted_length = len(answer)
+                        answer_saved = True
+                if event.get("type") == "done":
+                    done_sent = True
                 if event.get("type") == "tool_result" and event.get("tool") == "report":
                     _register_report_artifacts(db, task_id, event.get("artifacts") or [])
-                yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
-            if answer:
+                yield _sse_data(event)
+            if not done_sent:
+                yield _sse_data({"type": "done", "content": "完成", "session": session_store.metadata_for(task_id)})
+            final_answer = current_answer()
+            if final_answer or answer_saved:
                 _update_tool_record(db, trace_row, trace)
-                _save_message(db, task_id, "assistant", answer)
+                if final_answer and not answer_saved:
+                    _update_message_in_new_session(assistant_conv_id, final_answer)
                 sync_event_from_agent_session(db, task_id, session_store.metadata_for(task_id))
         except Exception as error:
+            if not answer_saved:
+                fallback = current_answer() or f"调用失败：{error}"
+                _update_message_in_new_session(assistant_conv_id, fallback)
             payload = {"type": "error", "content": str(error), "error": str(error)}
             _append_trace_event(trace, payload)
             _update_tool_record(db, trace_row, trace)
-            yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+            yield _sse_data(payload)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/{task_id}/agent/confirm-draft")
@@ -204,9 +243,24 @@ def _get_task_or_404(task_id: int, user_id: int, db: Session) -> Task:
     return task
 
 
-def _save_message(db: Session, task_id: int, role: str, content: str) -> None:
-    db.add(Conversation(task_id=task_id, role=role, content=content))
+def _save_message(db: Session, task_id: int, role: str, content: str) -> int:
+    row = Conversation(task_id=task_id, role=role, content=content)
+    db.add(row)
     db.commit()
+    db.refresh(row)
+    return int(row.conv_id)
+
+
+def _update_message_in_new_session(conv_id: int, content: str) -> None:
+    db = SessionLocal()
+    try:
+        row = db.query(Conversation).filter(Conversation.conv_id == conv_id).first()
+        if not row:
+            return
+        row.content = content
+        db.commit()
+    finally:
+        db.close()
 
 
 def _register_report_artifacts(db: Session, task_id: int, artifacts: list[dict[str, Any]]) -> None:
@@ -374,6 +428,10 @@ def _last_answer(events: list[dict[str, Any]]) -> str:
         if event.get("type") == "answer":
             return str(event.get("content") or "")
     return ""
+
+
+def _sse_data(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\r\n\r\n"
 
 
 def _new_trace_record(message: str) -> dict[str, Any]:

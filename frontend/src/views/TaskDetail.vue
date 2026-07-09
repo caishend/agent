@@ -39,15 +39,32 @@
             <div v-if="item.role === 'agent'" class="message-content markdown-body" v-html="renderMarkdown(item.content)" />
             <div v-else class="message-content">{{ item.content }}</div>
 
+            <div v-if="item.attachments?.length" class="message-attachments">
+              <a
+                v-for="file in item.attachments"
+                :key="file.file_path || file.doc_id || file.filename"
+                class="message-attachment"
+                :href="fileUrl(file)"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <img v-if="isUploadedImage(file) && fileUrl(file)" :src="fileUrl(file)" alt="附件预览" />
+                <span v-else class="attachment-icon">{{ attachmentIcon(file) }}</span>
+                <span>
+                  <strong>{{ file.filename || file.name || '附件' }}</strong>
+                  <small>{{ file.file_type || file.type || 'FILE' }}</small>
+                </span>
+              </a>
+            </div>
+
             <div v-if="displayArtifacts(item.artifacts).length" class="artifact-panel">
               <div v-for="artifact in displayArtifacts(item.artifacts)" :key="artifact.path" class="artifact-card">
-                <div class="artifact-title">
-                  {{ artifact.type === 'screenshot' ? '浏览器真实截图' : artifact.type === 'report' ? '分析报告已生成' : '工具产物' }}
-                </div>
+                <div class="artifact-title">{{ artifactTitle(artifact) }}</div>
                 <a :href="artifactUrl(artifact)" target="_blank" rel="noreferrer">
-                  <img v-if="artifact.type === 'screenshot'" :src="artifactUrl(artifact)" alt="网页截图" />
+                  <img v-if="isImageArtifact(artifact)" :src="artifactUrl(artifact)" alt="工具产物预览" />
                   <span v-else>{{ artifactName(artifact) }}</span>
                 </a>
+                <div v-if="artifactMeta(artifact)" class="artifact-meta">{{ artifactMeta(artifact) }}</div>
                 <small>{{ artifact.metadata?.url || artifact.path }}</small>
               </div>
             </div>
@@ -130,9 +147,32 @@
       </aside>
 
       <form class="simple-composer" @submit.prevent="runAgent">
+        <div v-if="pendingFiles.length" class="composer-files">
+          <div
+            v-for="file in pendingFiles"
+            :key="file.file_path || file.doc_id || file.filename"
+            class="composer-file-chip"
+          >
+            <img v-if="isUploadedImage(file) && fileUrl(file)" :src="fileUrl(file)" alt="待发送附件" />
+            <span v-else>{{ attachmentIcon(file) }}</span>
+            <strong>{{ file.filename }}</strong>
+            <button type="button" title="移除附件" @click="removePendingFile(file)">×</button>
+          </div>
+        </div>
+
         <div class="tool-picker">
+          <input ref="composerFileInput" class="hidden-file-input" type="file" multiple @change="attachFromComposer" />
+          <button
+            type="button"
+            class="attach-button"
+            title="上传并随本轮发送"
+            :disabled="loading || uploading"
+            @click="openComposerFilePicker"
+          >
+            {{ uploading ? '…' : '＋' }}
+          </button>
           <button type="button" class="attach-button" :class="{ active: selectedTool }" @click="toolMenuOpen = !toolMenuOpen">
-            {{ selectedTool ? selectedTool.icon : '+' }}
+            {{ selectedTool ? selectedTool.icon : '⌘' }}
           </button>
           <div v-if="toolMenuOpen" class="tool-menu">
             <button type="button" class="tool-option" @click="chooseTool(null)">
@@ -152,7 +192,7 @@
           :placeholder="selectedTool ? selectedTool.placeholder : '例如：搜索成都暴雨最新预警并截图'"
           @keydown.enter.exact.prevent="runAgent"
         />
-        <button class="send-button" :disabled="loading || !message.trim()">{{ loading ? '…' : '→' }}</button>
+        <button class="send-button" :disabled="loading || (!message.trim() && !pendingFiles.length)">{{ loading ? '…' : '→' }}</button>
       </form>
     </div>
   </AppShell>
@@ -190,6 +230,9 @@ const loading = ref(false)
 const messages = ref([])
 const session = ref({})
 const uploadedFiles = ref([])
+const pendingFiles = ref([])
+const composerFileInput = ref(null)
+const uploading = ref(false)
 const messagePanel = ref(null)
 const selectedTool = ref(null)
 const toolMenuOpen = ref(false)
@@ -214,6 +257,7 @@ async function loadTaskState() {
   task.value = await getTask(taskId.value)
   messages.value = []
   uploadedFiles.value = []
+  pendingFiles.value = []
   selectedTool.value = null
   toolMenuOpen.value = false
   await refreshSession()
@@ -302,18 +346,22 @@ function parseTraceRecord(content) {
 
 async function runAgent() {
   const text = message.value.trim()
-  if (!text || loading.value) return
+  if ((!text && !pendingFiles.value.length) || loading.value) return
 
   const currentTool = selectedTool.value
+  const attachments = [...pendingFiles.value]
+  const userContent = text ? withAttachmentSummary(text, attachments) : attachmentPrompt(attachments)
   messages.value.push({
     id: crypto.randomUUID(),
     role: 'user',
     title: currentTool ? `用户 · ${currentTool.label}` : '用户',
-    content: text
+    content: userContent,
+    attachments
   })
   await scrollToBottom()
 
   message.value = ''
+  pendingFiles.value = []
   toolMenuOpen.value = false
   loading.value = true
   const progressMessage = {
@@ -335,7 +383,7 @@ async function runAgent() {
       conversation_record: conversationRecord.value,
       ...(currentTool ? { forced_tool: currentTool.value } : {})
     }
-    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(), params }, event => {
+    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments), params }, event => {
       handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
@@ -493,19 +541,50 @@ async function confirmDraftFromMessage(item) {
 }
 
 async function upload(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  const form = new FormData()
-  form.append('file', file)
-  const uploaded = await uploadFile(taskId.value, form)
-  uploadedFiles.value.push(uploaded)
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  const uploadedBatch = await uploadSelectedFiles(files)
+  if (!uploadedBatch.length) return
   messages.value.push({
     id: crypto.randomUUID(),
     role: 'agent',
     title: 'Agent · 文件已上传',
-    content: `已接入 **${uploaded.filename}**，后续研究、灾害分析和报告都会自动带上该文件。`
+    content: `已接入 ${uploadedBatch.map(file => `**${file.filename}**`).join('、')}，后续研究、灾害分析和报告都会自动带上这些文件。`
   })
   event.target.value = ''
+}
+
+async function uploadSelectedFiles(files) {
+  uploading.value = true
+  const uploadedBatch = []
+  try {
+    for (const file of files) {
+      const form = new FormData()
+      form.append('file', file)
+      const uploaded = await uploadFile(taskId.value, form)
+      uploadedFiles.value.push(uploaded)
+      uploadedBatch.push(uploaded)
+    }
+    return uploadedBatch
+  } finally {
+    uploading.value = false
+  }
+}
+
+function openComposerFilePicker() {
+  composerFileInput.value?.click()
+}
+
+async function attachFromComposer(event) {
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  const uploadedBatch = await uploadSelectedFiles(files)
+  pendingFiles.value.push(...uploadedBatch)
+  event.target.value = ''
+}
+
+function removePendingFile(file) {
+  pendingFiles.value = pendingFiles.value.filter(item => item !== file && item.file_path !== file.file_path)
 }
 
 async function removeDocument(file) {
@@ -606,7 +685,39 @@ function artifactUrl(artifact) {
   const filename = normalized.split('/').pop()
   if (artifact.type === 'screenshot' && filename) return `/artifacts/screenshots/${filename}`
   if (artifact.type === 'report' && filename) return `/artifacts/reports/${filename}`
+  if ((artifact.type === 'remote_sensing_overlay' || artifact.type === 'object_detection') && normalized.includes('data/remote_sensing/')) {
+    return normalized.replace(/^.*data\/remote_sensing\//, '/artifacts/remote-sensing/')
+  }
   return normalized
+}
+
+function artifactTitle(artifact) {
+  const titles = {
+    screenshot: '浏览器真实截图',
+    report: '分析报告已生成',
+    remote_sensing_overlay: '遥感叠加结果',
+    object_detection: '图像识别结果'
+  }
+  return titles[artifact.type] || '工具产物'
+}
+
+function artifactMeta(artifact) {
+  const metadata = artifact.metadata || {}
+  if (artifact.type === 'object_detection') {
+    const count = metadata.detections_count ?? metadata.count
+    return count !== undefined ? `识别目标：${count} 个` : ''
+  }
+  if (artifact.type === 'remote_sensing_overlay') {
+    return metadata.description || metadata.layer || ''
+  }
+  if (artifact.type === 'report') {
+    return metadata.format ? `格式：${String(metadata.format).toUpperCase()}` : ''
+  }
+  return ''
+}
+
+function isImageArtifact(artifact) {
+  return ['screenshot', 'remote_sensing_overlay', 'object_detection'].includes(artifact.type)
 }
 
 function artifactName(artifact) {
@@ -624,6 +735,21 @@ function fileUrl(file) {
   if (normalized.startsWith('data/uploads/')) return `/artifacts/uploads/${normalized.slice('data/uploads/'.length)}`
   if (normalized.startsWith('data/reports/')) return `/artifacts/reports/${normalized.split('/').pop()}`
   return normalized.startsWith('/artifacts/') ? normalized : normalized
+}
+
+function isUploadedImage(file) {
+  const value = `${file.file_type || file.type || ''} ${file.filename || file.name || ''}`.toLowerCase()
+  return ['image', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'].some(token => value.includes(token))
+}
+
+function attachmentIcon(file) {
+  const value = `${file.file_type || file.type || ''} ${file.filename || file.name || ''}`.toLowerCase()
+  if (isUploadedImage(file)) return 'IMG'
+  if (value.includes('pdf')) return 'PDF'
+  if (value.includes('doc')) return 'DOC'
+  if (value.includes('xls') || value.includes('csv')) return 'XLS'
+  if (value.includes('tif') || value.includes('tiff')) return 'TIF'
+  return 'FILE'
 }
 
 function syncArtifactsToRelatedFiles(items) {
@@ -644,12 +770,27 @@ function addArtifactsToRelatedFiles(artifacts = []) {
   }
 }
 
-function currentFilePayload() {
-  return uploadedFiles.value.map(file => ({
+function currentFilePayload(currentTurnFiles = []) {
+  const selectedPaths = new Set(currentTurnFiles.map(file => file.file_path).filter(Boolean))
+  const files = currentTurnFiles.length
+    ? uploadedFiles.value.filter(file => selectedPaths.has(file.file_path))
+    : uploadedFiles.value
+  return files.map(file => ({
     path: file.file_path,
     name: file.filename,
     type: file.file_type
   }))
+}
+
+function withAttachmentSummary(text, attachments = []) {
+  if (!attachments.length) return text
+  return `${text}\n\n已随本轮发送附件：${attachments.map(file => file.filename).join('、')}`
+}
+
+function attachmentPrompt(attachments = []) {
+  return attachments.length
+    ? `请分析本轮上传的附件：${attachments.map(file => file.filename).join('、')}`
+    : ''
 }
 
 function enqueueAnswerDelta(messageItem, text) {

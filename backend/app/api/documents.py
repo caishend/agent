@@ -48,30 +48,58 @@ def list_documents(task_id: int,
 async def upload_file(task_id: int, file: UploadFile = File(...),
                       user_id: int = Depends(get_current_user_id),
                       db: Session = Depends(get_db)):
-    task = db.query(Task).filter(Task.task_id == task_id, Task.user_id == user_id).first()
-    if not task:
-        raise HTTPException(404, "任务不存在")
+    _get_task_or_404(task_id, user_id, db)
 
     save_dir = os.path.join(settings.UPLOAD_DIR, str(task_id))
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, file.filename)
+    filename = _safe_filename(file.filename)
+    save_path = _unique_path(Path(save_dir), filename)
 
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
-    ext = os.path.splitext(file.filename)[1].lower()
-    file_type = {".pdf": "PDF", ".docx": "DOCX", ".txt": "TXT",
-                 ".png": "IMAGE", ".jpg": "IMAGE", ".tif": "IMAGE"}.get(ext, "OTHER")
+    ext = save_path.suffix.lower()
+    file_type = FILE_TYPE_BY_EXTENSION.get(ext, "OTHER")
 
-    doc = Document(task_id=task_id, filename=file.filename,
-                   file_type=file_type, file_path=save_path)
+    doc = Document(task_id=task_id, filename=save_path.name,
+                   file_type=file_type, file_path=str(save_path))
     db.add(doc)
     db.commit()
     db.refresh(doc)
-    return {
+    payload = _document_payload(doc)
+    payload["mime_type"] = file.content_type
+    payload["status"] = "uploaded"
+    return payload
+
+
+def _get_task_or_404(task_id: int, user_id: int, db: Session) -> Task:
+    task = db.query(Task).filter(Task.task_id == task_id, Task.user_id == user_id).first()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
+def _safe_filename(filename: str | None) -> str:
+    name = Path(filename or "upload.bin").name.strip()
+    return name or "upload.bin"
+
+
+def _unique_path(directory: Path, filename: str) -> Path:
+    target = directory / filename
+    if not target.exists():
+        return target
+    stem = target.stem or "upload"
+    suffix = target.suffix
+    return directory / f"{stem}_{uuid4().hex[:8]}{suffix}"
+
+
+def _document_payload(doc: Document) -> dict:
+    ext = Path(doc.filename).suffix.lower()
+    file_type = doc.file_type or FILE_TYPE_BY_EXTENSION.get(ext, "OTHER")
+    payload = {
         "doc_id": doc.doc_id,
         "filename": doc.filename,
-        "file_type": doc.file_type,
+        "file_type": file_type,
         "file_path": doc.file_path,
         "status": "uploaded",
     }

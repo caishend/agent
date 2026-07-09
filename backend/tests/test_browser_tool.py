@@ -133,6 +133,11 @@ class BrowserToolTest(unittest.TestCase):
                 return None
 
         result = BrowserToolWithoutDefaultSearch().run(ToolInput(query="搜索北京暴雨预警"), self.context)
+        class BrowserToolWithoutDefaultSearch(BrowserTool):
+            def _default_search_tool(self):
+                return None
+
+        result = BrowserToolWithoutDefaultSearch().run(ToolInput(query="搜索北京暴雨预警"), self.context)
 
         self.assertEqual(result.data["search_mode"], "offline_fallback")
         self.assertGreater(len(result.evidence), 0)

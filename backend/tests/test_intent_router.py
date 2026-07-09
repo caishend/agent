@@ -7,6 +7,7 @@ from app.agent.tools.intent_router import IntentRouterTool
 class IntentRouterToolTest(unittest.TestCase):
     def setUp(self):
         self.router = IntentRouterTool(use_llm=False)
+        self.router = IntentRouterTool(use_llm=False)
         self.context = ToolContext(task_id=1, user_id=7)
 
     def route(self, query, files=None, params=None):
@@ -15,6 +16,7 @@ class IntentRouterToolTest(unittest.TestCase):
             self.context,
         )
 
+    def test_routes_disaster_knowledge_question_to_graphrag_only(self):
     def test_routes_disaster_knowledge_question_to_graphrag_only(self):
         result = self.route("为什么台风登陆后通常会减弱？")
 
@@ -38,6 +40,11 @@ class IntentRouterToolTest(unittest.TestCase):
         self.assertEqual(result.data["primary_intent"], "remote_sensing_analysis")
         self.assertEqual(result.data["tools"], ["remote_sensing"])
 
+    def test_manual_disaster_analysis_runs_full_report_chain(self):
+        result = self.route(
+            "整合保存的对话记录和文档，联网搜索后生成灾害分析报告",
+            params={"forced_tool": "disaster_analysis", "report_format": "docx"},
+        )
     def test_manual_disaster_analysis_runs_full_report_chain(self):
         result = self.route(
             "整合保存的对话记录和文档，联网搜索后生成灾害分析报告",

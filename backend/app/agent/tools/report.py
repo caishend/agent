@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import zipfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,13 @@ class ReportTool(BaseTool):
 
         report_format = output_path.suffix.lower().lstrip(".") or "pdf"
 
+        report_format = output_path.suffix.lower().lstrip(".") or "pdf"
+
         try:
+            if report_format == "docx":
+                self._write_docx(output_path, payload)
+            else:
+                self._write_pdf(output_path, payload)
             if report_format == "docx":
                 self._write_docx(output_path, payload)
             else:
@@ -38,6 +45,7 @@ class ReportTool(BaseTool):
         except OSError as exc:
             return self._failed(f"报告生成失败：无法写入报告文件：{exc}", "write_failed", error=str(exc))
 
+        artifacts = [ArtifactItem(type="report", path=str(output_path), metadata={"format": report_format})]
         artifacts = [ArtifactItem(type="report", path=str(output_path), metadata={"format": report_format})]
         metadata_path = self._write_metadata(output_path, payload)
         if metadata_path:
@@ -68,6 +76,7 @@ class ReportTool(BaseTool):
                 "risk_level": payload["risk_level"],
                 "risk_score": payload.get("risk_score"),
                 "evidence_count": len(payload["evidence"]),
+                "format": report_format,
                 "format": report_format,
             },
         )
@@ -350,6 +359,96 @@ class ReportTool(BaseTool):
 </Properties>""",
             )
 
+    def _write_docx(self, output_path: Path, payload: dict[str, Any]) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        paragraphs = [
+            payload["title"],
+            f"生成时间：{payload['generated_at']}",
+            f"任务 ID：{payload.get('task_id') or '-'}",
+            f"灾害类型：{payload['disaster_type']}",
+            f"目标区域：{payload['location']}",
+            f"综合风险：{self._risk_text(payload)}",
+            "",
+            "1. 摘要",
+            payload["summary"],
+            "",
+            "2. 已确认信息",
+            *self._numbered_lines(payload["known_info"], "暂无已确认信息。"),
+            "",
+            "3. 缺失信息与待核验假设",
+            *self._numbered_lines(payload["missing_info"], "暂无缺失信息。"),
+            "",
+            "4. 综合风险原因",
+            *self._numbered_lines(payload["reasons"], "暂无结构化风险原因。"),
+            "",
+            "5. 应急响应建议",
+            *self._numbered_lines(payload["suggestions"], "暂无建议。"),
+            "",
+            "6. 证据链附录",
+            *self._evidence_lines(payload["evidence"]),
+            "",
+            "7. 图片与文件产物",
+            *self._artifact_lines(payload["artifacts"]),
+            "",
+            "8. 参考资料",
+            *self._numbered_lines(payload["references"], "暂无参考资料。"),
+        ]
+
+        image_paths = self._docx_image_paths(payload["artifacts"])
+        image_relationships = {
+            path: {
+                "rid": f"rIdImage{index}",
+                "target": f"media/image{index}{path.suffix.lower()}",
+            }
+            for index, path in enumerate(image_paths, start=1)
+        }
+        document_xml = self._docx_document_xml(paragraphs, image_relationships)
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="jpg" ContentType="image/jpeg"/>
+  <Default Extension="jpeg" ContentType="image/jpeg"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>""",
+            )
+            archive.writestr(
+                "_rels/.rels",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>""",
+            )
+            archive.writestr("word/document.xml", document_xml)
+            archive.writestr("word/_rels/document.xml.rels", self._docx_relationships_xml(image_relationships))
+            for path, relation in image_relationships.items():
+                archive.writestr(f"word/{relation['target']}", path.read_bytes())
+            archive.writestr(
+                "docProps/core.xml",
+                f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>{self._xml_escape(payload["title"])}</dc:title>
+  <dc:creator>SkyGuard</dc:creator>
+  <cp:lastModifiedBy>SkyGuard Agent</cp:lastModifiedBy>
+</cp:coreProperties>""",
+            )
+            archive.writestr(
+                "docProps/app.xml",
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Application>SkyGuard</Application>
+</Properties>""",
+            )
+
     def _table(self, rows: list[list[Any]], normal: Any, colors: Any) -> list[Any]:
         from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 
@@ -441,9 +540,15 @@ class ReportTool(BaseTool):
         if report_format not in {"pdf", "docx"}:
             report_format = "pdf"
 
+        report_format = str(params.get("format") or params.get("report_format") or "pdf").lower().lstrip(".")
+        if report_format not in {"pdf", "docx"}:
+            report_format = "pdf"
+
         raw_path = params.get("output_path") or params.get("report_path")
         if raw_path:
             path = Path(str(raw_path)).expanduser()
+            if path.suffix.lower() != f".{report_format}":
+                path = path.with_suffix(f".{report_format}")
             if path.suffix.lower() != f".{report_format}":
                 path = path.with_suffix(f".{report_format}")
             return path

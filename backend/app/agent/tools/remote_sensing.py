@@ -6,11 +6,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from app.config import settings
 from app.agent.tools.base_tool import ArtifactItem, BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
+from app.agent.tools.disaster_detector import (
+    DisasterModelUnavailable,
+    DisasterObjectDetector,
+    DisasterPipelineDetector,
+)
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
-IMAGE_PATH_PATTERN = re.compile(r"([A-Za-z]:\\[^\s,;，；]+?\.(?:png|jpg|jpeg|tif|tiff|bmp|webp)|[^\s,;，；]+?\.(?:png|jpg|jpeg|tif|tiff|bmp|webp))", re.I)
+IMAGE_PATH_PATTERN = re.compile(r"([A-Za-z]:\\[^\s,;，；]+?\.(?:png|jpg|jpeg|tif|tiff|bmp|webp)|[^\s,;，；:：]+?\.(?:png|jpg|jpeg|tif|tiff|bmp|webp))", re.I)
 
 
 class RemoteSensingTool(BaseTool):
@@ -33,7 +39,7 @@ class RemoteSensingTool(BaseTool):
             )
 
         try:
-            from PIL import Image
+            from PIL import Image, ImageDraw
         except ImportError as exc:
             return self._failed(
                 "遥感分析失败：缺少 pillow 依赖，请先安装 backend/requirements.txt。",
@@ -49,7 +55,7 @@ class RemoteSensingTool(BaseTool):
 
         for image_path in image_paths:
             try:
-                result = self._analyze_image(Image, image_path, mode, params, processed_dir)
+                result = self._analyze_image(Image, ImageDraw, image_path, mode, params, processed_dir)
             except OSError as exc:
                 return self._failed(
                     f"遥感分析失败：无法读取影像 {image_path}：{exc}",
@@ -66,6 +72,17 @@ class RemoteSensingTool(BaseTool):
                     metadata={"source_image": str(image_path), "class": result["affected_class"]},
                 )
             )
+            artifacts.append(
+                ArtifactItem(
+                    type="object_detection",
+                    path=result["detection_path"],
+                    metadata={
+                        "source_image": str(image_path),
+                        "detector": result["detector"],
+                        "detections": len(result["detections"]),
+                    },
+                )
+            )
             evidence.append(
                 EvidenceItem(
                     source=str(image_path),
@@ -76,6 +93,7 @@ class RemoteSensingTool(BaseTool):
                         "affected_ratio": result["affected_ratio"],
                         "area_km2": result["area_km2"],
                         "method": result["method"],
+                        "detections": result["detections"],
                     },
                 )
             )
@@ -92,7 +110,7 @@ class RemoteSensingTool(BaseTool):
         )
 
         return ToolResult(
-            summary=summary,
+            summary=f"{summary} Object detector found {aggregate['detection_count']} disaster candidate boxes.",
             evidence=evidence,
             artifacts=artifacts,
             confidence=aggregate["confidence"],
@@ -108,6 +126,7 @@ class RemoteSensingTool(BaseTool):
     def _analyze_image(
         self,
         Image: Any,
+        ImageDraw: Any,
         image_path: Path,
         mode: str,
         params: dict[str, Any],
@@ -116,6 +135,17 @@ class RemoteSensingTool(BaseTool):
         with Image.open(image_path) as image:
             original_width, original_height = image.size
             rgb = image.convert("RGB")
+
+        model_result = self._analyze_with_disaster_pipeline(
+            image_path,
+            params,
+            processed_dir,
+            original_width,
+            original_height,
+        )
+        if model_result is not None:
+            return model_result
+
         analysis_image = rgb.copy()
         max_dimension = self._positive_int(params.get("max_dimension"), default=1024)
         analysis_image.thumbnail((max_dimension, max_dimension))
@@ -141,6 +171,9 @@ class RemoteSensingTool(BaseTool):
         area_km2 = self._estimate_area_km2(affected_ratio, original_width, original_height, params)
         confidence = self._estimate_confidence(affected_ratio, params)
         overlay_path = self._write_overlay(Image, analysis_image, affected_flags, image_path, processed_dir)
+        detector = self._detector(params)
+        detections = detector.detect(analysis_image, mode=mode)
+        detection_path = detector.write_annotated_image(ImageDraw, analysis_image, detections, image_path, processed_dir)
 
         return {
             "image_path": str(image_path),
@@ -156,9 +189,55 @@ class RemoteSensingTool(BaseTool):
             "area_km2": area_km2,
             "confidence": confidence,
             "overlay_path": str(overlay_path),
+            "detection_path": str(detection_path),
             "method": "pillow_color_heuristic_v1",
+            "detector": "pillow_connected_component_disaster_detector_v1",
+            "model_status": "fallback",
+            "model_error": params.get("_disaster_model_error"),
+            "detections": detections,
             "class_ratios": {key: count / total_pixels for key, count in class_counts.items()},
         }
+
+    def _analyze_with_disaster_pipeline(
+        self,
+        image_path: Path,
+        params: dict[str, Any],
+        processed_dir: Path,
+        original_width: int,
+        original_height: int,
+    ) -> dict[str, Any] | None:
+        if not self._use_disaster_pipeline(params):
+            return None
+
+        threshold = self._positive_float(
+            params.get("disaster_gate_threshold")
+            if params.get("disaster_gate_threshold") is not None
+            else settings.DISASTER_GATE_THRESHOLD
+        )
+        detector = DisasterPipelineDetector(
+            model_dir=params.get("disaster_model_dir") or settings.DISASTER_MODEL_DIR,
+            device=str(params.get("disaster_model_device") or settings.DISASTER_MODEL_DEVICE or "auto"),
+            gate_threshold=threshold,
+        )
+        try:
+            result = detector.analyze(image_path, processed_dir)
+        except DisasterModelUnavailable as exc:
+            params["_disaster_model_error"] = str(exc)
+            return None
+
+        result["area_km2"] = self._estimate_area_km2(
+            result["affected_ratio"],
+            original_width,
+            original_height,
+            params,
+        )
+        return result
+
+    def _use_disaster_pipeline(self, params: dict[str, Any]) -> bool:
+        value = params.get("use_disaster_pipeline", settings.DISASTER_MODEL_ENABLED)
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
 
     def _write_overlay(
         self,
@@ -181,12 +260,17 @@ class RemoteSensingTool(BaseTool):
 
     def _collect_image_paths(self, tool_input: ToolInput) -> tuple[list[Path], list[str]]:
         raw_values: list[Any] = []
+        uploaded_path_by_name: dict[str, str] = {}
         params = tool_input.params or {}
         for key in ("image_path", "image_paths", "remote_sensing_path", "remote_sensing_paths", "file_path", "file_paths"):
             if key in params:
                 raw_values.append(params[key])
         for file_info in tool_input.files:
-            raw_values.append(file_info.get("path") or file_info.get("file_path"))
+            uploaded_path = file_info.get("path") or file_info.get("file_path")
+            uploaded_name = file_info.get("name") or file_info.get("filename") or Path(str(uploaded_path or "")).name
+            if uploaded_path and uploaded_name:
+                uploaded_path_by_name[str(uploaded_name).lower()] = str(uploaded_path)
+            raw_values.append(uploaded_path)
         raw_values.extend(match.group(1) for match in IMAGE_PATH_PATTERN.finditer(tool_input.query or ""))
 
         paths: list[Path] = []
@@ -196,16 +280,27 @@ class RemoteSensingTool(BaseTool):
                 item = item.get("path") or item.get("file_path")
             if item is None or str(item).strip() == "":
                 continue
-            path = self._resolve_existing_path(str(item))
+            raw_item = str(item).strip()
+            candidate_item = self._normalize_candidate_path(raw_item)
+            uploaded_match = uploaded_path_by_name.get(Path(candidate_item).name.lower())
+            path = self._resolve_existing_path(uploaded_match or candidate_item)
             if path is None:
-                invalid.append(str(item))
+                if uploaded_match or (paths and Path(candidate_item).name.lower() in uploaded_path_by_name):
+                    continue
+                invalid.append(raw_item)
                 continue
             if path.suffix.lower() not in IMAGE_EXTENSIONS:
-                invalid.append(str(item))
+                invalid.append(raw_item)
                 continue
             paths.append(path)
 
         return list(dict.fromkeys(paths)), list(dict.fromkeys(invalid))
+
+    def _normalize_candidate_path(self, raw_path: str) -> str:
+        value = raw_path.strip().strip('"\'`[]()<>')
+        if not re.match(r"^[A-Za-z]:[\\/]", value) and ("：" in value or ":" in value):
+            value = re.split(r"[:：]", value)[-1].strip()
+        return value.strip().strip('"\'`[]()<>')
 
     def _resolve_existing_path(self, raw_path: str) -> Path | None:
         path = Path(raw_path).expanduser()
@@ -285,6 +380,18 @@ class RemoteSensingTool(BaseTool):
         area_m2 = affected_ratio * original_width * original_height * pixel_area_m2
         return area_m2 / 1_000_000
 
+    def _detector(self, params: dict[str, Any]) -> DisasterObjectDetector:
+        min_area_ratio = self._positive_float(params.get("detection_min_area_ratio"))
+        max_detections = self._positive_int(params.get("max_detections_per_class"), default=8)
+        scope = str(params.get("detection_scope") or "all").lower()
+        if scope not in {"all", "mode"}:
+            scope = "all"
+        return DisasterObjectDetector(
+            min_area_ratio=min_area_ratio if min_area_ratio is not None else 0.0015,
+            max_detections_per_class=max_detections,
+            scope=scope,
+        )
+
     def _positive_int(self, value: Any, default: int) -> int:
         try:
             parsed = int(value)
@@ -310,6 +417,7 @@ class RemoteSensingTool(BaseTool):
     def _aggregate(self, results: list[dict[str, Any]]) -> dict[str, Any]:
         total_pixels = sum(item["total_pixels"] for item in results) or 1
         affected_pixels = sum(item["affected_pixels"] for item in results)
+        detection_count = sum(len(item.get("detections", [])) for item in results)
         area_values = [item["area_km2"] for item in results if item.get("area_km2") is not None]
         confidence = sum(item["confidence"] for item in results) / len(results)
         class_counts: dict[str, int] = {}
@@ -325,6 +433,7 @@ class RemoteSensingTool(BaseTool):
             "affected_ratio": affected_pixels / total_pixels,
             "area_km2": sum(area_values) if area_values else None,
             "confidence": round(confidence, 2),
+            "detection_count": detection_count,
         }
 
     def _evidence_text(self, result: dict[str, Any]) -> str:

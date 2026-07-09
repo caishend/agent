@@ -1,7 +1,8 @@
-"""Agent tool orchestration runtime."""
+﻿"""Agent tool orchestration runtime."""
 from __future__ import annotations
 
 from collections.abc import Iterator
+import time
 from typing import Any
 
 from app.agent.llm import stream_llm_answer
@@ -17,6 +18,71 @@ from app.agent.tools.remote_sensing import RemoteSensingTool
 from app.agent.tools.report import ReportTool
 from app.agent.tools.risk_assessment import RiskAssessmentTool
 from app.agent.tools.task_draft import TaskDraftTool
+
+
+def _chunk_text(text: str, size: int = 8) -> Iterator[str]:
+    for index in range(0, len(text), size):
+        yield text[index : index + size]
+
+
+def _artifact_public_url(artifact_path: str, artifact_type: str) -> str:
+    normalized = str(artifact_path or "").replace("\\", "/")
+    filename = normalized.rsplit("/", 1)[-1]
+    if artifact_type == "screenshot" and filename:
+        return f"/artifacts/screenshots/{filename}"
+    if artifact_type == "report" and filename:
+        return f"/artifacts/reports/{filename}"
+    marker = "data/remote_sensing/"
+    if artifact_type in {"remote_sensing_overlay", "object_detection"} and marker in normalized:
+        return "/artifacts/remote-sensing/" + normalized.split(marker, 1)[1]
+    return normalized
+
+
+def _image_result_appendix(results: dict[str, ToolResult]) -> str:
+    result = results.get("remote_sensing")
+    if not result or result.data.get("remote_sensing_status") != "analyzed":
+        return ""
+
+    aggregate = result.data.get("aggregate") or {}
+    images = result.data.get("images") or []
+    artifacts = [item.__dict__ for item in result.artifacts]
+    overlay_urls = [
+        _artifact_public_url(item.get("path", ""), item.get("type", ""))
+        for item in artifacts
+        if item.get("type") == "remote_sensing_overlay"
+    ]
+    detection_urls = [
+        _artifact_public_url(item.get("path", ""), item.get("type", ""))
+        for item in artifacts
+        if item.get("type") == "object_detection"
+    ]
+
+    lines = ["", "### 图像处理结果"]
+    lines.append(f"- 模型状态：{images[0].get('model_status', 'unknown') if images else 'unknown'}")
+    if images and images[0].get("gate"):
+        lines.append(f"- 门控结果：{images[0]['gate']}")
+    lines.append(f"- 疑似灾害类型：{aggregate.get('affected_class_name', 'unknown')}")
+    lines.append(f"- 影响区域占比：{float(aggregate.get('affected_ratio') or 0):.2%}")
+    lines.append(f"- 检测框数量：{int(aggregate.get('detection_count') or 0)}")
+    if overlay_urls:
+        lines.append(f"- 灾害区域叠加图：{overlay_urls[0]}")
+    if detection_urls:
+        lines.append(f"- 物体检测标注图：{detection_urls[0]}")
+
+    top_detections: list[dict[str, Any]] = []
+    for image in images:
+        top_detections.extend(image.get("detections") or [])
+    top_detections.sort(key=lambda item: float(item.get("confidence") or 0), reverse=True)
+    if top_detections:
+        lines.append("- Top 检测结果：")
+        for item in top_detections[:5]:
+            bbox = item.get("bbox") or []
+            lines.append(
+                f"  - {item.get('class_name') or item.get('label')} "
+                f"conf={float(item.get('confidence') or 0):.2f}, bbox={bbox}"
+            )
+
+    return "\n".join(lines)
 
 
 class AgentSessionStore:
@@ -250,7 +316,10 @@ def _ensure_document_rag_fallback(tools: list[str], tool_input: ToolInput) -> li
     if not _has_document_file(tool_input.files):
         return tools
     query = tool_input.query or ""
-    needs_text_retrieval = any(keyword in query for keyword in ("什么时候", "时间", "发生", "哪里", "原因", "影响", "风险", "暴雨", "灾害"))
+    needs_text_retrieval = any(
+        keyword in query
+        for keyword in ("什么时候", "时间", "发生", "哪里", "原因", "影响", "风险", "暴雨", "灾害")
+    )
     if not needs_text_retrieval:
         return tools
 
@@ -268,8 +337,14 @@ def _ensure_document_rag_fallback(tools: list[str], tool_input: ToolInput) -> li
 
 def _sanitize_tools_for_request(tools: list[str], query: str) -> list[str]:
     normalized_query = (query or "").lower()
-    screenshot_or_search = any(keyword in normalized_query for keyword in ("截图", "截屏", "网页图", "页面图", "搜索", "最新", "预警", "screenshot"))
-    analysis_or_report = any(keyword in normalized_query for keyword in ("灾害分析", "风险评估", "生成报告", "报告", "建档", "知识图谱", "构建图谱"))
+    screenshot_or_search = any(
+        keyword in normalized_query
+        for keyword in ("截图", "截屏", "网页图", "页面图", "搜索", "最新", "预警", "screenshot")
+    )
+    analysis_or_report = any(
+        keyword in normalized_query
+        for keyword in ("灾害分析", "风险评估", "生成报告", "报告", "建档", "知识图谱", "构建图谱")
+    )
     if screenshot_or_search and not analysis_or_report:
         return [tool for tool in tools if tool == "browser"] or ["browser"]
     return tools
@@ -341,7 +416,6 @@ def _tool_result_event(tool_name: str, result: ToolResult) -> dict[str, Any]:
         "need_user_confirm": result.need_user_confirm,
     }
 
-
 def synthesize_answer(
     message: str,
     results: dict[str, ToolResult],
@@ -357,6 +431,10 @@ def synthesize_answer(
     lines = ["本轮已完成以下工具调用："]
     for tool_name, result in results.items():
         lines.append(f"- **{tool_name}**：{result.summary}")
+
+    image_appendix = _image_result_appendix(results)
+    if image_appendix:
+        lines.append(image_appendix)
     return "\n".join(lines)
 
 
@@ -364,7 +442,7 @@ def _parse_report_format(message: str) -> str | None:
     normalized = message.strip().lower()
     if any(word in normalized for word in ("word", "docx", "文档")):
         return "docx"
-    if any(word in normalized for word in ("pdf",)):
+    if "pdf" in normalized:
         return "pdf"
     return None
 

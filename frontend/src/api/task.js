@@ -1,10 +1,10 @@
 import http from './index'
 
-export const getTasks    = ()       => http.get('/tasks')
-export const getTask     = (id)     => http.get(`/tasks/${id}`)
-export const createTask  = (data)   => http.post('/tasks', data)
-export const deleteTask  = (id)     => http.delete(`/tasks/${id}`)
-export const uploadFile  = (id, form) => http.post(`/tasks/${id}/upload`, form, {
+export const getTasks = () => http.get('/tasks')
+export const getTask = (id) => http.get(`/tasks/${id}`)
+export const createTask = (data) => http.post('/tasks', data)
+export const deleteTask = (id) => http.delete(`/tasks/${id}`)
+export const uploadFile = (id, form) => http.post(`/tasks/${id}/upload`, form, {
   headers: { 'Content-Type': 'multipart/form-data' }
 })
 export const runAgentMessage = (id, data) => http.post(`/tasks/${id}/agent/message`, data)

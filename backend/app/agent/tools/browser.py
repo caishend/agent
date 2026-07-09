@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urlparse
+from urllib.parse import urlparse
 
 from app.agent.tools.base_tool import ArtifactItem, BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 
@@ -43,7 +44,10 @@ class BrowserTool(BaseTool):
     def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
         query = tool_input.query.strip()
         search_query = self._prepare_search_query(query)
+        search_query = self._prepare_search_query(query)
         params = tool_input.params or {}
+        provided_search_tool = params.get("search_tool")
+        search_tool = provided_search_tool or self._default_search_tool()
         provided_search_tool = params.get("search_tool")
         search_tool = provided_search_tool or self._default_search_tool()
 
@@ -55,6 +59,7 @@ class BrowserTool(BaseTool):
                 raw_results = self._offline_fallback_results(search_query, error=str(error))
                 search_mode = "offline_fallback"
         else:
+            raw_results = self._offline_fallback_results(search_query)
             raw_results = self._offline_fallback_results(search_query)
             search_mode = "offline_fallback"
 
@@ -70,6 +75,7 @@ class BrowserTool(BaseTool):
             confidence=confidence,
             data={
                 "search_mode": search_mode,
+                "query": search_query,
                 "query": search_query,
                 "search_results": search_results,
                 "screenshot_observations": screenshot_observations,
@@ -125,6 +131,7 @@ class BrowserTool(BaseTool):
             return [{"title": "web_search", "url": None, "content": raw_results}]
         if isinstance(raw_results, dict):
             raw_items = raw_results["results"] if isinstance(raw_results.get("results"), list) else [raw_results]
+            raw_items = raw_results["results"] if isinstance(raw_results.get("results"), list) else [raw_results]
         else:
             raw_items = list(raw_results)
 
@@ -151,6 +158,18 @@ class BrowserTool(BaseTool):
                     "metadata": {
                         key: value
                         for key, value in item.items()
+                        if key
+                        not in {
+                            "title",
+                            "source",
+                            "name",
+                            "url",
+                            "link",
+                            "content",
+                            "snippet",
+                            "description",
+                            "body",
+                        }
                         if key
                         not in {
                             "title",
