@@ -140,36 +140,12 @@ def iter_agent_events(
         params = {
             **pending_request.get("params", {}),
             **params,
-            "forced_tool": pending_request.get("forced_tool", "disaster_analysis"),
+            "forced_tool": pending_request.get("forced_tool", "report"),
             "report_format": selected_format,
             "format": selected_format,
-            "auto_confirm_memory": True,
-            "capture_screenshot": True,
         }
         message = pending_request.get("message") or message
         metadata.pop("pending_report_request", None)
-
-    forced_tool = str(params.get("forced_tool") or "")
-    needs_report_format = forced_tool in {"disaster_analysis", "task_draft", "report"}
-    if needs_report_format and not (params.get("report_format") or params.get("format")):
-        metadata["pending_report_request"] = {
-            "message": message,
-            "params": params,
-            "forced_tool": forced_tool,
-        }
-        yield {
-            "type": "report_format_required",
-            "content": "生成灾害分析报告前，请选择导出格式：Word 还是 PDF？",
-            "data": {"choices": [{"label": "Word", "format": "docx"}, {"label": "PDF", "format": "pdf"}]},
-        }
-        yield {"type": "answer", "content": "请选择报告格式：**Word** 或 **PDF**。"}
-        yield {"type": "done", "content": "等待报告格式选择", "session": metadata}
-        return
-
-    if needs_report_format:
-        params.setdefault("auto_confirm_memory", True)
-        params.setdefault("capture_screenshot", True)
-        params.setdefault("format", params.get("report_format", "docx"))
 
     context = ToolContext(task_id=task_id, user_id=user_id, metadata=metadata)
     tool_input = ToolInput(query=message, files=files or [], params=params)
@@ -184,19 +160,41 @@ def iter_agent_events(
     tools_to_run = router_result.data.get("tools", [])
     if _has_image_file(tool_input.files) and "remote_sensing" not in tools_to_run:
         tools_to_run = ["remote_sensing", *tools_to_run]
-    if params.get("forced_tool") != "remote_sensing":
+    if params.get("forced_tool") not in {"remote_sensing", "disaster_analysis", "report"}:
         tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
     tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
     tools_to_run = _remove_runtime_graph_ingest(tools_to_run)
     router_data = dict(router_result.data or {})
     router_data["tools"] = tools_to_run
+
+    if "report" in tools_to_run and not (params.get("report_format") or params.get("format")):
+        metadata["pending_report_request"] = {
+            "message": message,
+            "params": {**params, "forced_tool": "report"},
+            "forced_tool": "report",
+        }
+        yield {"type": "intent", "content": _router_summary(router_data), "data": router_data}
+        yield {
+            "type": "report_format_required",
+            "content": "生成报告前，请选择导出格式：Word 还是 PDF？",
+            "data": {"choices": [{"label": "Word", "format": "docx"}, {"label": "PDF", "format": "pdf"}]},
+        }
+        yield {"type": "answer", "content": "请选择报告格式：**Word** 或 **PDF**。"}
+        yield {"type": "done", "content": "等待报告格式选择", "session": metadata}
+        return
+
+    if "report" in tools_to_run:
+        params.setdefault("format", params.get("report_format", "docx"))
+        tool_input = ToolInput(query=message, files=files or [], params=params)
+
     yield {"type": "intent", "content": _router_summary(router_data), "data": router_data}
 
     results: dict[str, ToolResult] = {}
     for tool_name in tools_to_run:
         yield {"type": "tool_call", "tool": tool_name, "content": f"正在调用工具：{tool_name}"}
         try:
-            result = call_tool(tool_name, tool_input, context)
+            current_input = _with_runtime_evidence(tool_input, results) if tool_name == "risk_assessment" else tool_input
+            result = call_tool(tool_name, current_input, context)
             results[tool_name] = result
             _update_session_from_result(tool_name, result, metadata)
             yield _tool_result_event(tool_name, result)
@@ -301,16 +299,8 @@ def _prepare_tool_input(
         params["formal_memory"] = metadata["formal_memory"]
     if tool_name == "report":
         params.setdefault("format", params.get("report_format", "docx"))
-        if metadata.get("formal_memory") and "task" not in params:
-            params["task"] = metadata["formal_memory"]
-        if metadata.get("risk_assessment") and "risk_assessment" not in params:
-            params["risk_assessment"] = metadata["risk_assessment"]
         if metadata.get("documents") and "documents" not in params:
             params["documents"] = metadata["documents"]
-        if metadata.get("evidence") and "evidence" not in params:
-            params["evidence"] = metadata["evidence"]
-        if metadata.get("artifacts") and "artifacts" not in params:
-            params["artifacts"] = metadata["artifacts"]
         if metadata.get("conversation_record") and "summary" not in params:
             params["summary"] = metadata["conversation_record"]
     if tool_name == "email":
@@ -321,6 +311,38 @@ def _prepare_tool_input(
         if metadata.get("last_report_path") and "attachments" not in params:
             params["attachments"] = [metadata["last_report_path"]]
 
+    return ToolInput(query=tool_input.query, files=tool_input.files, params=params)
+
+
+def _with_runtime_evidence(tool_input: ToolInput, results: dict[str, ToolResult]) -> ToolInput:
+    params = dict(tool_input.params or {})
+    if params.get("formal_memory"):
+        return ToolInput(query=tool_input.query, files=tool_input.files, params=params)
+
+    candidate_evidence: list[dict[str, Any]] = []
+    for tool_name, result in results.items():
+        for item in result.evidence:
+            payload = item.__dict__.copy()
+            payload.setdefault("source", tool_name)
+            candidate_evidence.append(payload)
+        if result.summary:
+            candidate_evidence.append(
+                {
+                    "source": tool_name,
+                    "type": "tool_summary",
+                    "content": result.summary,
+                    "confidence": result.confidence,
+                }
+            )
+
+    draft_result = TaskDraftTool().run(
+        ToolInput(query=tool_input.query, files=tool_input.files, params={"candidate_evidence": candidate_evidence}),
+        context=None,
+    )
+    draft = dict(draft_result.data.get("draft") or {})
+    draft["status"] = "confirmed"
+    draft["candidate_evidence"] = candidate_evidence
+    params["formal_memory"] = draft
     return ToolInput(query=tool_input.query, files=tool_input.files, params=params)
 
 

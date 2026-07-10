@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     DISASTER_MODEL_WARMUP: bool = True
     DISASTER_MODEL_DIR: str = "disaster"
     DISASTER_MODEL_DEVICE: str = "auto"
-    DISASTER_GATE_THRESHOLD: Optional[float] = 0.9
+    DISASTER_GATE_THRESHOLD: Optional[float] = 0.8
     DISASTER_MODEL_TIMEOUT_SECONDS: float = 45.0
 
     # 搜索

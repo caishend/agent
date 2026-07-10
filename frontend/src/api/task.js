@@ -48,7 +48,7 @@ export async function streamAgentMessage(id, data, onEvent) {
         .filter(item => item.startsWith('data:'))
         .map(item => item.replace(/^data:\s?/, ''))
       if (!dataLines.length) continue
-      onEvent(JSON.parse(dataLines.join('\n')))
+      await onEvent(JSON.parse(dataLines.join('\n')))
     }
   }
 
@@ -58,7 +58,7 @@ export async function streamAgentMessage(id, data, onEvent) {
       .split('\n')
       .filter(item => item.startsWith('data:'))
       .map(item => item.replace(/^data:\s?/, ''))
-    if (dataLines.length) onEvent(JSON.parse(dataLines.join('\n')))
+    if (dataLines.length) await onEvent(JSON.parse(dataLines.join('\n')))
   }
 }
 export const confirmDraft = (id, data) => http.post(`/tasks/${id}/agent/confirm-draft`, data)

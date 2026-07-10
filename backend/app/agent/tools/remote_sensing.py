@@ -57,6 +57,13 @@ class RemoteSensingTool(BaseTool):
         for image_path in image_paths:
             try:
                 result = self._analyze_image(Image, ImageDraw, image_path, mode, params, processed_dir)
+            except DisasterModelUnavailable as exc:
+                return self._failed(
+                    f"遥感分析失败：深度灾害识别模型未成功执行，已停止颜色算法兜底。错误：{exc}",
+                    "disaster_model_unavailable",
+                    error=str(exc),
+                    image_path=str(image_path),
+                )
             except OSError as exc:
                 return self._failed(
                     f"遥感分析失败：无法读取影像 {image_path}：{exc}",
@@ -66,24 +73,35 @@ class RemoteSensingTool(BaseTool):
                 )
 
             results.append(result)
+            overlay_path = result["overlay_path"]
+            detection_path = result["detection_path"]
             artifacts.append(
                 ArtifactItem(
                     type="remote_sensing_overlay",
-                    path=result["overlay_path"],
-                    metadata={"source_image": str(image_path), "class": result["affected_class"]},
-                )
-            )
-            artifacts.append(
-                ArtifactItem(
-                    type="object_detection",
-                    path=result["detection_path"],
+                    path=overlay_path,
                     metadata={
                         "source_image": str(image_path),
-                        "detector": result["detector"],
-                        "detections": len(result["detections"]),
+                        "class": result["affected_class"],
+                        "model_status": result.get("model_status"),
+                        "method": result.get("method"),
+                        "detector": result.get("detector"),
                     },
                 )
             )
+            if str(detection_path).replace("\\", "/") != str(overlay_path).replace("\\", "/"):
+                artifacts.append(
+                    ArtifactItem(
+                        type="object_detection",
+                        path=detection_path,
+                        metadata={
+                            "source_image": str(image_path),
+                            "detector": result["detector"],
+                            "detections": len(result["detections"]),
+                            "model_status": result.get("model_status"),
+                            "method": result.get("method"),
+                        },
+                    )
+                )
             evidence.append(
                 EvidenceItem(
                     source=str(image_path),
@@ -146,6 +164,8 @@ class RemoteSensingTool(BaseTool):
         )
         if model_result is not None:
             return model_result
+        if self._use_disaster_pipeline(params) and params.get("_disaster_model_error") and not self._allow_disaster_fallback(params):
+            raise DisasterModelUnavailable(params["_disaster_model_error"])
 
         analysis_image = rgb.copy()
         max_dimension = self._positive_int(params.get("max_dimension"), default=1024)
@@ -250,6 +270,12 @@ class RemoteSensingTool(BaseTool):
         value = params.get("use_disaster_pipeline", settings.DISASTER_MODEL_ENABLED)
         if isinstance(value, str):
             return value.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(value)
+
+    def _allow_disaster_fallback(self, params: dict[str, Any]) -> bool:
+        value = params.get("allow_disaster_fallback", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
     def _write_overlay(

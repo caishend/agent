@@ -7,6 +7,7 @@ bounding box, area ratio, and an annotated image.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
 from collections import deque
@@ -255,7 +256,7 @@ class DisasterPipelineDetector:
     def analyze(self, image_path: Path, output_dir: Path) -> dict[str, Any]:
         pipeline = self._pipeline()
         output_dir.mkdir(parents=True, exist_ok=True)
-        visual_dir = output_dir / f"{image_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_model"
+        visual_dir = output_dir / f"{self._safe_output_stem(image_path)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_model"
 
         try:
             from PIL import Image
@@ -267,6 +268,7 @@ class DisasterPipelineDetector:
                 width, height = image.size
             raw_result = pipeline.run(image_path)
             visual_paths = [str(path) for path in pipeline.visualize(image_path, raw_result, visual_dir)]
+            overlay_path = self._extract_overlay_panel(visual_paths[0], visual_dir) if visual_paths else str(image_path)
         except Exception as exc:  # noqa: BLE001 - convert model failures into fallback signal
             raise DisasterModelUnavailable(str(exc)) from exc
 
@@ -274,7 +276,6 @@ class DisasterPipelineDetector:
         segmentations = self._parse_segmentations(raw_result)
         affected = self._affected_summary(detections, segmentations)
         confidence = self._confidence(raw_result.get("gate"), detections, segmentations)
-        representative_path = visual_paths[0] if visual_paths else str(image_path)
 
         return {
             "model_status": "ok",
@@ -290,8 +291,8 @@ class DisasterPipelineDetector:
             "affected_ratio": affected["ratio"],
             "area_km2": None,
             "confidence": confidence,
-            "overlay_path": representative_path,
-            "detection_path": representative_path,
+            "overlay_path": overlay_path,
+            "detection_path": overlay_path,
             "method": self.detector_name,
             "detector": self.detector_name,
             "detections": detections,
@@ -303,6 +304,27 @@ class DisasterPipelineDetector:
 
     def preload(self) -> None:
         self._pipeline()
+
+    def _extract_overlay_panel(self, visual_path: str, output_dir: Path) -> str:
+        path = Path(visual_path)
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                width, height = image.size
+                if width < height * 2:
+                    return str(path)
+                panel_width = width // 3
+                overlay = image.crop((panel_width * 2, 0, width, height))
+                output_path = output_dir / f"{path.stem[:36]}_overlay_only{path.suffix}"
+                overlay.save(output_path)
+                return str(output_path)
+        except Exception:
+            return str(path)
+
+    def _safe_output_stem(self, image_path: Path) -> str:
+        digest = hashlib.md5(str(image_path).encode("utf-8")).hexdigest()[:8]
+        return f"{image_path.stem[:42]}_{digest}"
 
     def _pipeline(self) -> Any:
         key = (str(self.model_dir), self.device, self.gate_threshold)

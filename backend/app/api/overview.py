@@ -423,7 +423,6 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
     allowed_task_ids = [task.task_id for task in db.query(Task).filter(Task.user_id == user_id).all()]
     if graph_task_id and graph_task_id not in allowed_task_ids:
         return {"categories": [], "nodes": [], "links": []}
-    _ensure_knowledge_graph_from_documents(db, allowed_task_ids, graph_task_id)
 
     entity_query = db.query(KnowledgeGraphEntity)
     relation_query = db.query(KnowledgeGraphRelation)
@@ -439,7 +438,15 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
     nodes = {}
     node_aliases: dict[tuple[str | None, str, str], tuple[int | None, str]] = {}
     categories = set()
-    for entity in entity_query.order_by(KnowledgeGraphEntity.updated_at.desc()).limit(graph_limit).all():
+    for entity in (
+        entity_query.order_by(
+            KnowledgeGraphEntity.task_id.asc(),
+            KnowledgeGraphEntity.name.asc(),
+            KnowledgeGraphEntity.entity_type.asc(),
+        )
+        .limit(graph_limit)
+        .all()
+    ):
         canonical_key = (entity.task_id, entity.name)
         node_aliases[(entity.task_id, entity.name, entity.entity_type)] = canonical_key
         categories.add(entity.entity_type)
@@ -459,27 +466,20 @@ def _build_persisted_knowledge_graph(db: Session, user_id: int, graph_task_id: i
         }
 
     links = []
-    for relation in relation_query.order_by(KnowledgeGraphRelation.created_at.desc()).limit(max(DEFAULT_GRAPH_LINK_LIMIT, graph_limit * 2)).all():
+    for relation in (
+        relation_query.order_by(
+            KnowledgeGraphRelation.task_id.asc(),
+            KnowledgeGraphRelation.source_name.asc(),
+            KnowledgeGraphRelation.target_name.asc(),
+            KnowledgeGraphRelation.relation_type.asc(),
+        )
+        .limit(max(DEFAULT_GRAPH_LINK_LIMIT, graph_limit * 2))
+        .all()
+    ):
         source_key = (relation.task_id, relation.source_name)
         target_key = (relation.task_id, relation.target_name)
-        if len(nodes) >= graph_limit and (source_key not in nodes or target_key not in nodes):
+        if source_key not in nodes or target_key not in nodes:
             continue
-        if source_key not in nodes:
-            nodes[source_key] = {
-                "id": f"kg:{relation.task_id}:{relation.source_name}",
-                "name": relation.source_name,
-                "category": relation.source_type,
-                "value": relation.confidence or 0.7,
-                "task_id": relation.task_id,
-            }
-        if target_key not in nodes:
-            nodes[target_key] = {
-                "id": f"kg:{relation.task_id}:{relation.target_name}",
-                "name": relation.target_name,
-                "category": relation.target_type,
-                "value": relation.confidence or 0.7,
-                "task_id": relation.task_id,
-            }
         nodes[source_key]["category"] = _merge_graph_category(nodes[source_key]["category"], relation.source_type)
         nodes[target_key]["category"] = _merge_graph_category(nodes[target_key]["category"], relation.target_type)
         categories.update([relation.source_type, relation.target_type])

@@ -282,8 +282,8 @@ const toolOptions = [
   { value: 'browser', icon: '🌐', label: '网页搜索', desc: '搜索网页并可用浏览器截图', placeholder: '搜索成都暴雨最新预警并截图' },
   { value: 'research', icon: '🔎', label: '深度研究', desc: 'GraphRAG / 文档综合检索', placeholder: '输入需要深度研究的问题' },
   { value: 'remote_sensing', icon: '🛰️', label: '图像识别', desc: '遥感影像或图片识别', placeholder: '描述要从图片中识别什么' },
-  { value: 'disaster_analysis', icon: '⚠️', label: '灾害分析/报告', desc: '整合记录、文档、联网搜索并生成报告', placeholder: '描述灾害分析目标，系统会先询问导出 Word 还是 PDF' },
-  { value: 'report', icon: '📄', label: '生成报告', desc: '选择格式后生成 Word/PDF 报告', placeholder: '生成一份灾害研判报告' },
+  { value: 'disaster_analysis', icon: '⚠️', label: '灾害分析', desc: '联网搜索、GraphRAG 与灾害评估，不生成报告', placeholder: '成都暴雨灾害评估' },
+  { value: 'report', icon: '📄', label: '生成报告', desc: '只整合保存记录和相关文档，选择格式后导出 Word/PDF', placeholder: '基于保存记录和相关文档生成报告' },
   { value: 'email', icon: '✉️', label: '发送邮件', desc: '发送正文或报告附件', placeholder: '发给 xxx@example.com，并附上报告' }
 ]
 
@@ -462,7 +462,13 @@ async function refreshRunningMessageFromHistory(progressMessage) {
   }
 
   const assistantContent = String(latestAssistant?.content || '').trim()
-  if (assistantContent && assistantContent !== '正在生成回复...' && assistantContent !== progressMessage.content) {
+  if (
+    !loading.value &&
+    !progressMessage.streamingAnswerStarted &&
+    assistantContent &&
+    assistantContent !== '正在生成回复...' &&
+    assistantContent !== progressMessage.content
+  ) {
     progressMessage.title = 'Agent'
     progressMessage.content = assistantContent
   }
@@ -512,8 +518,8 @@ async function runAgent() {
       ...(currentTool ? { forced_tool: currentTool.value } : {}),
       ...(payloadFiles.some(isUploadedImage) ? { forced_tool: 'remote_sensing', disable_llm_router: true } : {})
     }
-    await streamAgentMessage(taskId.value, { message: userContent, files: payloadFiles, params }, event => {
-      handleStreamEvent(event, progressMessage)
+    await streamAgentMessage(taskId.value, { message: userContent, files: payloadFiles, params }, async event => {
+      await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
@@ -610,19 +616,16 @@ async function handleStreamEvent(event, progressMessage) {
     progressMessage.title = 'Agent'
     progressMessage.traceOpen = false
     const finalContent = event.content || progressMessage.content || '已完成。'
-    if (!progressMessage.streamingAnswerStarted) {
-      progressMessage.content = ''
-      progressMessage.streamingAnswerStarted = true
-      enqueueAnswerDelta(progressMessage, finalContent)
-    } else {
-      cleanupTyping(progressMessage)
-    }
+    cleanupTyping(progressMessage)
+    progressMessage.content = finalContent
+    progressMessage.streamingAnswerStarted = false
     await scrollToBottom()
     return
   }
 
   if (event.type === 'done') {
     session.value = event.session || session.value
+    progressMessage.traceOpen = false
     return
   }
 
@@ -668,8 +671,8 @@ async function chooseReportFormat(item, format) {
         report_format: format,
         format
       }
-    }, event => {
-      handleStreamEvent(event, progressMessage)
+    }, async event => {
+      await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
@@ -1033,15 +1036,22 @@ function artifactTitle(artifact) {
 function artifactMeta(artifact) {
   const metadata = artifact.metadata || {}
   if (artifact.type === 'object_detection') {
-    const count = metadata.detections_count ?? metadata.count
-    return count !== undefined ? `识别目标：${count} 个` : ''
+    const count = metadata.detections ?? metadata.detections_count ?? metadata.count
+    const model = modelStatusLabel(metadata)
+    return [model, count !== undefined ? `识别目标：${count} 个` : ''].filter(Boolean).join(' · ')
   }
   if (artifact.type === 'remote_sensing_overlay') {
-    return metadata.description || metadata.layer || ''
+    return [modelStatusLabel(metadata), metadata.description || metadata.layer || ''].filter(Boolean).join(' · ')
   }
   if (artifact.type === 'report') {
     return metadata.format ? `格式：${String(metadata.format).toUpperCase()}` : ''
   }
+  return ''
+}
+
+function modelStatusLabel(metadata = {}) {
+  if (metadata.model_status === 'ok') return `深度模型：${metadata.method || metadata.detector || 'OK'}`
+  if (metadata.model_status === 'fallback') return `兜底算法：${metadata.method || metadata.detector || 'fallback'}`
   return ''
 }
 
@@ -1055,7 +1065,16 @@ function artifactName(artifact) {
 }
 
 function displayArtifacts(artifacts = []) {
-  return (artifacts || []).filter(artifact => artifact.type !== 'report_metadata')
+  const seen = new Set()
+  return (artifacts || []).filter(artifact => {
+    if (artifact.type === 'report_metadata') return false
+    const path = String(artifact.path || '').replaceAll('\\', '/')
+    const key = `${artifact.type}:${path}`
+    if (seen.has(path) || seen.has(key)) return false
+    seen.add(path)
+    seen.add(key)
+    return true
+  })
 }
 
 function fileUrl(file) {

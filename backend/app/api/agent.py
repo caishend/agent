@@ -123,6 +123,7 @@ def stream_agent_message(
                 if event.get("type") == "answer":
                     answer = str(event.get("content") or "")
                     if answer:
+                        answer_chunks = [answer]
                         last_persisted_length = len(answer)
                         answer_saved = True
                 if event.get("type") == "done":

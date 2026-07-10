@@ -49,7 +49,7 @@ class DisasterObjectDetectorTest(unittest.TestCase):
         self.assertTrue(any(item.type == "object_detection" for item in result.artifacts))
         self.assertTrue(result.data["images"][0]["detections"])
 
-    def test_remote_sensing_falls_back_when_pipeline_is_unavailable(self):
+    def test_remote_sensing_fails_when_pipeline_is_unavailable_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "fallback.png"
             image = Image.new("RGB", (80, 60), (50, 130, 55))
@@ -70,11 +70,36 @@ class DisasterObjectDetectorTest(unittest.TestCase):
                 ToolContext(task_id=999, user_id=1),
             )
 
+        self.assertEqual(result.data["remote_sensing_status"], "failed")
+        self.assertEqual(result.data["reason"], "disaster_model_unavailable")
+        self.assertIn("missing-disaster-model-dir", result.data["error"])
+
+    def test_remote_sensing_can_explicitly_allow_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "fallback.png"
+            image = Image.new("RGB", (80, 60), (50, 130, 55))
+            for x in range(12, 68):
+                for y in range(18, 50):
+                    image.putpixel((x, y), (25, 95, 180))
+            image.save(image_path)
+
+            result = RemoteSensingTool().run(
+                ToolInput(
+                    query="detect flood disaster objects",
+                    params={
+                        "image_path": str(image_path),
+                        "use_disaster_pipeline": True,
+                        "disaster_model_dir": "missing-disaster-model-dir",
+                        "allow_disaster_fallback": True,
+                    },
+                ),
+                ToolContext(task_id=999, user_id=1),
+            )
+
         image_result = result.data["images"][0]
         self.assertEqual(result.data["remote_sensing_status"], "analyzed")
         self.assertEqual(image_result["model_status"], "fallback")
         self.assertTrue(image_result["model_error"])
-        self.assertGreater(result.data["aggregate"]["detection_count"], 0)
 
     def test_remote_sensing_accepts_multiple_uploaded_images_with_attachment_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

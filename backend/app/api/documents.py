@@ -249,7 +249,6 @@ def _clear_task_knowledge_graph(db: Session, task_id: int) -> None:
 
 
 def _rebuild_task_knowledge_graph(db: Session, task: Task) -> None:
-    _clear_task_knowledge_graph(db, task.task_id)
     rows = db.query(Document).filter(Document.task_id == task.task_id).all()
     files = [
         {"path": row.file_path, "name": row.filename, "filename": row.filename, "type": row.file_type}
@@ -259,6 +258,7 @@ def _rebuild_task_knowledge_graph(db: Session, task: Task) -> None:
 
     metadata = session_store.metadata_for(task.task_id)
     if not files:
+        _clear_task_knowledge_graph(db, task.task_id)
         metadata.pop("documents", None)
         metadata.pop("knowledge_graph", None)
         metadata.pop("neo4j_ingest_status", None)
@@ -279,7 +279,7 @@ def _rebuild_task_knowledge_graph(db: Session, task: Task) -> None:
     )
     metadata["knowledge_graph"] = payload
     metadata["neo4j_ingest_status"] = write_payload_to_neo4j(payload)
-    _upsert_knowledge_graph_payload(db, task.task_id, payload)
+    _replace_knowledge_graph_payload(db, task.task_id, payload)
 
 
 def _schedule_task_knowledge_graph_rebuild(task_id: int) -> None:
@@ -344,6 +344,12 @@ def _upsert_knowledge_graph_payload(db: Session, task_id: int, payload: dict) ->
             )
         )
     db.commit()
+
+
+def _replace_knowledge_graph_payload(db: Session, task_id: int, payload: dict) -> None:
+    db.query(KnowledgeGraphRelation).filter(KnowledgeGraphRelation.task_id == task_id).delete(synchronize_session=False)
+    db.query(KnowledgeGraphEntity).filter(KnowledgeGraphEntity.task_id == task_id).delete(synchronize_session=False)
+    _upsert_knowledge_graph_payload(db, task_id, payload)
 
 
 def _remove_document_from_session(task_id: int, file_path: str, filename: str) -> None:

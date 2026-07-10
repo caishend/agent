@@ -131,7 +131,7 @@ class IntentRouterTool(BaseTool):
                 "document_qa": "针对上传 PDF/DOCX/TXT/MD 等文档，使用 document；必要时再 graphrag。",
                 "browser": "需要最新、实时、网页、公告、预警、浏览器搜索或截图时使用 browser。",
                 "remote_sensing": "图像识别、遥感、卫星影像、水体/淹没区域识别使用 remote_sensing。",
-                "disaster_analysis": "灾害分析/报告生成可调用 browser、graphrag、document、task_draft、memory、risk_assessment、report。",
+                "disaster_analysis": "灾害分析/灾害评估只允许调用 browser、graphrag、risk_assessment；不要生成报告。只有明确要求生成/导出报告时才调用 report。",
                 "graphrag": "GraphRAG 只检索当前任务上传的文档；知识图谱构建由上传/删除文档接口后台完成，不要在对话中构建图谱。",
                 "email": "发送邮件或通知调用 email。",
             },
@@ -194,30 +194,20 @@ class IntentRouterTool(BaseTool):
             intents.append("document_understanding")
             tools.append("document")
 
-        if has_confirmed_task and (signals["assessment"] or signals["disaster"]):
-            primary_intent = "risk_assessment"
+        if signals["disaster"] and (signals["report"] or "报告" in normalized_query):
+            primary_intent = "report_generation"
             intents.append(primary_intent)
-            tools.append("risk_assessment")
-            next_step = "run_risk_assessment"
-        elif signals["disaster"] and (signals["report"] or "报告" in normalized_query):
-            primary_intent = "disaster_analysis"
-            intents.append(primary_intent)
-            tools = self._disaster_report_tools(tools)
+            tools = ["report"]
             next_step = "generate_report"
         elif signals["disaster"]:
             primary_intent = "disaster_analysis"
             intents.append(primary_intent)
-            if "browser" not in tools:
-                tools.insert(0, "browser")
-            if "graphrag" not in tools:
-                tools.append("graphrag")
-            tools.append("task_draft")
-            next_step = "confirm_task_draft"
-            need_user_confirm = True
+            tools = ["browser", "graphrag", "risk_assessment"]
+            next_step = "run_risk_assessment"
         elif signals["report"]:
             primary_intent = "report_generation"
             intents.append(primary_intent)
-            tools.extend(["risk_assessment", "report"])
+            tools = ["report"]
             next_step = "generate_report"
         elif signals["email"]:
             primary_intent = "email_notification"
@@ -266,10 +256,12 @@ class IntentRouterTool(BaseTool):
             tools = ["browser"]
             next_step = "answer"
             need_user_confirm = False
-        if primary_intent == "disaster_analysis" and "report" in tools:
-            tools = self._disaster_report_tools(tools)
+        if primary_intent == "disaster_analysis":
+            tools = [tool for tool in tools if tool in {"browser", "graphrag", "risk_assessment"}]
+            if "risk_assessment" not in tools:
+                tools.append("risk_assessment")
             need_user_confirm = False
-            next_step = "generate_report"
+            next_step = "run_risk_assessment" if "risk_assessment" in tools else "answer"
 
         return {
             "primary_intent": primary_intent,
@@ -330,16 +322,16 @@ class IntentRouterTool(BaseTool):
             return {"tools": tools, "next_step": "answer", "need_user_confirm": False}
         if forced_tool == "remote_sensing":
             return {"tools": ["remote_sensing"], "next_step": "answer", "need_user_confirm": False}
-        if forced_tool in {"disaster_analysis", "task_draft"}:
-            tools: list[str] = ["browser", "graphrag"]
-            if file_profile["has_document"]:
-                tools.append("document")
-            if file_profile["has_image"]:
-                tools.append("remote_sensing")
-            tools.extend(["task_draft", "memory", "risk_assessment", "report"])
-            return {"tools": self._dedupe(tools), "next_step": "generate_report", "need_user_confirm": False}
+        if forced_tool == "disaster_analysis":
+            return {
+                "tools": ["browser", "graphrag", "risk_assessment"],
+                "next_step": "run_risk_assessment",
+                "need_user_confirm": False,
+            }
+        if forced_tool == "task_draft":
+            return {"tools": ["task_draft"], "next_step": "confirm_task_draft", "need_user_confirm": True}
         if forced_tool == "report":
-            return {"tools": ["risk_assessment", "report"], "next_step": "generate_report", "need_user_confirm": False}
+            return {"tools": ["report"], "next_step": "generate_report", "need_user_confirm": False}
         if forced_tool == "email":
             return {"tools": ["email"], "next_step": "send_email", "need_user_confirm": False}
         if forced_tool == "risk_assessment":
@@ -468,6 +460,9 @@ def _router_system_prompt() -> str:
         "你需要判断用户本轮输入是否需要调用工具，以及工具调用顺序。"
         "普通问答可以 tools=[]。工具只能从 available_tools 中选择。"
         "如果用户只是要求网页搜索、最新信息或截图，tools 只能包含 browser。"
+        "灾害分析/灾害评估不等于生成报告，只能使用 browser、graphrag、risk_assessment。"
+        "只有用户明确说生成报告、导出报告、Word、PDF 时，才允许 tools 包含 report。"
+        "报告生成只负责整合已保存对话记录和当前任务相关文档，不要规划联网搜索或风险评估。"
         "GraphRAG 只用于检索当前任务上传的文档；不要规划知识图谱构建工具。"
         "JSON 字段：primary_intent, intents, tools, next_step, need_user_confirm, confidence, reason, signals。"
     )
