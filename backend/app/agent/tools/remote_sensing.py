@@ -230,7 +230,7 @@ class RemoteSensingTool(BaseTool):
             try:
                 result = future.result(timeout=timeout_seconds)
             finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=False)
         except TimeoutError:
             params["_disaster_model_error"] = f"model inference timed out after {timeout_seconds:.0f}s"
             return None
@@ -428,12 +428,12 @@ class RemoteSensingTool(BaseTool):
             return default
         return parsed if parsed > 0 else default
 
-    def _positive_float(self, value: Any) -> float | None:
+    def _positive_float(self, value: Any, default: float | None = None) -> float | None:
         try:
             parsed = float(value)
         except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
+            return default
+        return parsed if parsed > 0 else default
 
     def _estimate_confidence(self, affected_ratio: float, params: dict[str, Any]) -> float:
         base = 0.58

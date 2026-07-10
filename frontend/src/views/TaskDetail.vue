@@ -479,12 +479,14 @@ async function runAgent() {
   startStreamFallbackPolling(progressMessage)
 
   try {
+    const payloadFiles = currentFilePayload(attachments, currentTool)
     const params = {
       conversation_record: conversationRecord.value,
-      ...(currentTool ? { forced_tool: currentTool.value } : {})
+      ...(currentTool ? { forced_tool: currentTool.value } : {}),
+      ...(payloadFiles.some(isUploadedImage) ? { forced_tool: 'remote_sensing', disable_llm_router: true } : {})
     }
-    await streamAgentMessage(taskId.value, { message: text, files: currentFilePayload(attachments, currentTool), params }, async event => {
-      await handleStreamEvent(event, progressMessage)
+    await streamAgentMessage(taskId.value, { message: userContent, files: payloadFiles, params }, event => {
+      handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
@@ -524,11 +526,12 @@ async function handleStreamEvent(event, progressMessage) {
 
   if (event.type === 'answer_delta') {
     if (!progressMessage.streamingAnswerStarted) {
-      progressMessage.title = 'Agent · LLM 生成中'
+      progressMessage.title = 'Agent · 流式接收中'
       progressMessage.content = ''
       progressMessage.streamingAnswerStarted = true
     }
-    enqueueAnswerDelta(progressMessage, event.content || '')
+    progressMessage.content += event.content || ''
+    await scrollToBottom()
     await nextTick()
     return
   }
@@ -574,7 +577,14 @@ async function handleStreamEvent(event, progressMessage) {
   if (event.type === 'answer') {
     progressMessage.title = 'Agent'
     progressMessage.traceOpen = false
-    finishTyping(progressMessage, event.content || progressMessage.content || '已完成。')
+    const finalContent = event.content || progressMessage.content || '已完成。'
+    if (!progressMessage.streamingAnswerStarted) {
+      progressMessage.content = ''
+      progressMessage.streamingAnswerStarted = true
+      enqueueAnswerDelta(progressMessage, finalContent)
+    } else {
+      cleanupTyping(progressMessage)
+    }
     await scrollToBottom()
     return
   }
@@ -626,8 +636,8 @@ async function chooseReportFormat(item, format) {
         report_format: format,
         format
       }
-    }, async event => {
-      await handleStreamEvent(event, progressMessage)
+    }, event => {
+      handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
     progressMessage.title = 'Agent · 调用失败'
@@ -690,7 +700,7 @@ function openComposerFilePicker() {
 async function attachFromComposer(event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
-  const uploadedBatch = selectedTool.value?.value === 'remote_sensing'
+  const uploadedBatch = selectedTool.value?.value === 'remote_sensing' || files.some(isImageLikeFile)
     ? await uploadTemporaryImages(files)
     : await uploadSelectedFiles(files)
   pendingFiles.value.push(...uploadedBatch)
@@ -993,8 +1003,12 @@ function currentFilePayload(currentTurnFiles = [], currentTool = null) {
   const files = currentTurnFiles
   return files.map(file => ({
     path: file.file_path,
+    file_path: file.file_path,
     name: file.filename,
-    type: file.file_type
+    filename: file.filename,
+    type: file.file_type,
+    file_type: file.file_type,
+    mime_type: file.mime_type
   }))
 }
 
