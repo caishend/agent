@@ -15,6 +15,7 @@ http.interceptors.response.use(
   err => {
     if (err.response?.status === 401) {
       localStorage.removeItem('token')
+      localStorage.removeItem('userInfo')
       window.location.href = '/login'
     }
     return Promise.reject(err)

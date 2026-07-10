@@ -4,6 +4,7 @@ const routes = [
   { path: '/',        redirect: '/login' },
   { path: '/login',   component: () => import('../views/Login.vue') },
   { path: '/dashboard', component: () => import('../views/Dashboard.vue') },
+  { path: '/account', component: () => import('../views/Account.vue') },
   { path: '/tasks',   component: () => import('../views/TaskList.vue') },
   { path: '/tasks/:id', component: () => import('../views/TaskDetail.vue') }
 ]

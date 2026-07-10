@@ -1,86 +1,102 @@
 <template>
   <div class="login-page">
     <section class="login-hero">
-      <div class="brand">
-        <span class="brand-mark" />
+      <div class="login-brand-row">
+        <span class="login-brand-mark">SG</span>
         <span>
-          <div class="brand-title">SkyGuard</div>
-          <div class="brand-subtitle">Emergency Intelligence Platform</div>
+          <strong>SkyGuard</strong>
+          <small>灾害智能分析平台</small>
         </span>
       </div>
 
-      <div>
-        <div class="eyebrow">Earth Observation · Graph RAG · Decision Support</div>
-        <h1 class="page-title" style="font-size:58px; max-width:780px;">
-          面向灾害分析人员的可信智能研判平台
-        </h1>
-        <p class="page-desc" style="max-width:680px; font-size:17px;">
-          融合文档、网页证据、知识图谱与遥感影像，支撑应急管理场景下的任务化分析、风险评估和报告输出。
-        </p>
+      <div class="login-hero-copy">
+        <div class="eyebrow">Emergency Operations Console</div>
+        <h1>把灾害线索、证据和研判收进同一个工作台。</h1>
+        <p>面向应急分析人员的任务化工作空间，支持文档、网页证据、遥感影像与报告流程协同。</p>
       </div>
 
-      <div class="grid-12">
-        <div class="metric" style="grid-column:span 4;">
-          <div class="metric-label">Evidence Trace</div>
-          <div class="metric-value">100%</div>
+      <div class="login-command-stage" aria-hidden="true">
+        <div class="command-board">
+          <div class="board-topline">
+            <span>Situation Board</span>
+            <strong>LIVE</strong>
+          </div>
+          <div class="board-map">
+            <span class="map-line horizontal one" />
+            <span class="map-line horizontal two" />
+            <span class="map-line vertical one" />
+            <span class="map-line vertical two" />
+            <span class="map-node main" />
+            <span class="map-node left" />
+            <span class="map-node right" />
+          </div>
+          <div class="board-metrics">
+            <div>
+              <small>Evidence</small>
+              <strong>42</strong>
+            </div>
+            <div>
+              <small>Reports</small>
+              <strong>08</strong>
+            </div>
+            <div>
+              <small>Tasks</small>
+              <strong>16</strong>
+            </div>
+          </div>
         </div>
-        <div class="metric" style="grid-column:span 4;">
-          <div class="metric-label">Agent Tools</div>
-          <div class="metric-value">10</div>
-        </div>
-        <div class="metric" style="grid-column:span 4;">
-          <div class="metric-label">Decision Mode</div>
-          <div class="metric-value">Human</div>
-        </div>
+        <div class="command-slab slab-a" />
+        <div class="command-slab slab-b" />
       </div>
     </section>
 
-    <section class="login-card panel panel-pad">
-      <div class="row-between">
-        <div>
-          <div class="eyebrow">Secure Console</div>
-          <h2 class="page-title" style="font-size:30px;">
-            {{ mode === 'login' ? '控制台登录' : '创建分析员账号' }}
-          </h2>
+    <section class="login-panel-wrap">
+      <div class="login-card">
+        <div class="login-card-header">
+          <div>
+            <div class="eyebrow">Secure Access</div>
+            <h2>{{ mode === 'login' ? '登录工作台' : '创建分析员账号' }}</h2>
+          </div>
+          <span class="status-pill">{{ mode === 'login' ? 'SIGN IN' : 'REGISTER' }}</span>
         </div>
-        <span class="status-pill">{{ mode === 'login' ? 'SIGN IN' : 'REGISTER' }}</span>
+
+        <p class="login-note">
+          {{ mode === 'login' ? '继续进入任务、证据与灾害研判工作流。' : '创建账号后即可保存任务与对话记录。' }}
+        </p>
+
+        <form class="login-form" @submit.prevent="submit">
+          <label class="login-field">
+            <span>用户名</span>
+            <input v-model="form.username" autocomplete="username" required />
+          </label>
+
+          <label v-if="mode === 'register'" class="login-field">
+            <span>邮箱</span>
+            <input v-model="form.email" type="email" autocomplete="email" required />
+          </label>
+
+          <label class="login-field">
+            <span>密码</span>
+            <input
+              v-model="form.password"
+              type="password"
+              autocomplete="current-password"
+              required
+            />
+          </label>
+
+          <button class="login-submit" :disabled="loading">
+            {{ loading ? '处理中...' : mode === 'login' ? '进入平台' : '注册账号' }}
+          </button>
+
+          <button class="login-switch" type="button" @click="toggleMode">
+            {{ mode === 'login' ? '没有账号？创建一个' : '已有账号？返回登录' }}
+          </button>
+
+          <p v-if="error" class="login-feedback danger">{{ error }}</p>
+          <p v-if="message" class="login-feedback success">{{ message }}</p>
+        </form>
       </div>
-      <p class="page-desc">
-        {{ mode === 'login' ? '进入任务管理、证据检索和智能灾害分析工作台。' : '注册后即可创建灾害任务并运行 Agent 工具链。' }}
-      </p>
-
-      <form class="stack" style="margin-top:26px;" @submit.prevent="submit">
-        <label>
-          <span class="field-label">用户名</span>
-          <input v-model="form.username" class="field" autocomplete="username" required />
-        </label>
-
-        <label v-if="mode === 'register'">
-          <span class="field-label">邮箱</span>
-          <input v-model="form.email" class="field" type="email" autocomplete="email" required />
-        </label>
-
-        <label>
-          <span class="field-label">密码</span>
-          <input
-            v-model="form.password"
-            class="field"
-            type="password"
-            autocomplete="current-password"
-            required
-          />
-        </label>
-
-        <button class="btn" :disabled="loading">
-          {{ loading ? '处理中...' : mode === 'login' ? '进入平台' : '注册账号' }}
-        </button>
-        <button class="btn secondary" type="button" @click="toggleMode">
-          {{ mode === 'login' ? '没有账号？创建一个' : '已有账号？返回登录' }}
-        </button>
-
-        <p v-if="error" class="muted" style="color:var(--danger);">{{ error }}</p>
-        <p v-if="message" class="muted" style="color:var(--success);">{{ message }}</p>
-      </form>
     </section>
   </div>
 </template>
