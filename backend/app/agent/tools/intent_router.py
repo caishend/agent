@@ -97,6 +97,9 @@ class IntentRouterTool(BaseTool):
         quick_plan = self._quick_browser_plan(query.lower(), tool_input)
         if quick_plan:
             return self._to_result(quick_plan)
+        plain_plan = self._quick_plain_qa_plan(query.lower(), tool_input)
+        if plain_plan:
+            return self._to_result(plain_plan)
 
         if self.use_llm and not params.get("disable_llm_router") and is_llm_configured():
             try:
@@ -363,6 +366,46 @@ class IntentRouterTool(BaseTool):
                 "router_source": "rules_fast_path",
             }
         return None
+
+    def _quick_plain_qa_plan(self, normalized_query: str, tool_input: ToolInput) -> dict[str, Any] | None:
+        if tool_input.files or not normalized_query.strip():
+            return None
+        tool_signals = (
+            "搜索",
+            "最新",
+            "网页",
+            "截图",
+            "报告",
+            "邮件",
+            "发送",
+            "上传",
+            "文件",
+            "文档",
+            "图片",
+            "图像",
+            "识别",
+            "遥感",
+            "灾害分析",
+            "风险评估",
+            "生成",
+            "导出",
+            "pdf",
+            "word",
+            "docx",
+        )
+        if any(keyword in normalized_query for keyword in tool_signals):
+            return None
+        return {
+            "primary_intent": "general_qa",
+            "intents": ["general_qa"],
+            "tools": [],
+            "next_step": "answer",
+            "need_user_confirm": False,
+            "confidence": 0.86,
+            "reason": "普通对话快速路径：跳过意图识别 LLM，直接进入最终回答流。",
+            "signals": {"plain_qa_fast_path": True},
+            "router_source": "rules_fast_path",
+        }
 
     def _profile_files(self, files: list[dict[str, Any]]) -> dict[str, bool]:
         has_image = False

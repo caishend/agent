@@ -182,6 +182,8 @@ def iter_agent_events(
     yield {"type": "thinking", "content": "正在识别意图并规划工具调用..."}
     router_result = IntentRouterTool().run(tool_input, context)
     tools_to_run = router_result.data.get("tools", [])
+    if _has_image_file(tool_input.files) and "remote_sensing" not in tools_to_run:
+        tools_to_run = ["remote_sensing", *tools_to_run]
     if params.get("forced_tool") != "remote_sensing":
         tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
     tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
@@ -232,9 +234,15 @@ def iter_agent_events(
     yield {"type": "llm_call", "content": "正在调用 LLM 整合对话记录、相关文档、联网结果与报告产物..."}
     answer = ""
     try:
+        yielded_delta = False
         for chunk in stream_llm_answer(message, results, metadata):
             answer += chunk
-            yield {"type": "answer_delta", "content": chunk}
+            for visible_chunk in _chunk_text(chunk):
+                yielded_delta = True
+                yield {"type": "answer_delta", "content": visible_chunk}
+                time.sleep(0.01)
+        if not yielded_delta:
+            raise RuntimeError("LLM 未返回可流式输出内容")
     except Exception as error:
         answer = synthesize_answer(message, results, metadata)
         yield {
@@ -373,6 +381,19 @@ def _has_document_file(files: list[dict[str, Any]]) -> bool:
     for file_info in files or []:
         name = str(file_info.get("name") or file_info.get("filename") or file_info.get("path") or "")
         if any(name.lower().endswith(extension) for extension in document_extensions):
+            return True
+    return False
+
+
+def _has_image_file(files: list[dict[str, Any]]) -> bool:
+    image_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+    for file_info in files or []:
+        name = str(file_info.get("name") or file_info.get("filename") or file_info.get("path") or "")
+        file_type = str(file_info.get("type") or file_info.get("file_type") or "").lower()
+        mime_type = str(file_info.get("mime_type") or "").lower()
+        if file_type == "image" or mime_type.startswith("image/"):
+            return True
+        if any(name.lower().endswith(extension) for extension in image_extensions):
             return True
     return False
 

@@ -74,7 +74,40 @@ def stream_llm_answer(
 ) -> Iterator[str]:
     if not is_llm_configured():
         raise LLMUnavailableError("LLM 未配置：请设置 OPENAI_API_KEY 和 LLM_MODEL")
-    yield from _stream_with_httpx(message, results, metadata)
+    try:
+        yield from _stream_with_langchain(message, results, metadata)
+    except Exception:
+        yield from _stream_with_httpx(message, results, metadata)
+
+
+def _stream_with_langchain(
+    message: str,
+    results: dict[str, ToolResult],
+    metadata: dict[str, Any],
+) -> Iterator[str]:
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_openai import ChatOpenAI
+    except ImportError as exc:
+        raise LLMUnavailableError("LangChain 流式依赖未安装") from exc
+
+    llm = ChatOpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        base_url=settings.OPENAI_BASE_URL,
+        model=settings.LLM_MODEL,
+        temperature=0.2,
+        streaming=True,
+        timeout=60,
+        max_retries=0,
+    )
+    messages = [
+        SystemMessage(content=_answer_system_prompt()),
+        HumanMessage(content=_answer_user_prompt(message, results, metadata)),
+    ]
+    for chunk in llm.stream(messages):
+        text = _normalize_chunk_content(getattr(chunk, "content", ""))
+        if text:
+            yield text
 
 
 def _stream_with_httpx(

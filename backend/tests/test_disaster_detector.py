@@ -76,6 +76,40 @@ class DisasterObjectDetectorTest(unittest.TestCase):
         self.assertTrue(image_result["model_error"])
         self.assertGreater(result.data["aggregate"]["detection_count"], 0)
 
+    def test_remote_sensing_accepts_multiple_uploaded_images_with_attachment_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_paths = []
+            for name in ("first.jpg", "second.jpg"):
+                image_path = Path(tmp) / name
+                image = Image.new("RGB", (40, 30), (25, 95, 180))
+                image.save(image_path)
+                image_paths.append(image_path)
+
+            result = RemoteSensingTool().run(
+                ToolInput(
+                    query="识别图片灾害\n\n已随本轮发送附件：first.jpg、second.jpg",
+                    files=[
+                        {
+                            "path": str(image_paths[0]),
+                            "name": "first.jpg",
+                            "type": "IMAGE",
+                            "mime_type": "image/jpeg",
+                        },
+                        {
+                            "path": str(image_paths[1]),
+                            "name": "second.jpg",
+                            "type": "IMAGE",
+                            "mime_type": "image/jpeg",
+                        },
+                    ],
+                    params={"use_disaster_pipeline": False},
+                ),
+                ToolContext(task_id=999, user_id=1),
+            )
+
+        self.assertEqual(result.data["remote_sensing_status"], "analyzed")
+        self.assertEqual(len(result.data["images"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

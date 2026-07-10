@@ -230,7 +230,7 @@ class RemoteSensingTool(BaseTool):
             try:
                 result = future.result(timeout=timeout_seconds)
             finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+                executor.shutdown(wait=False)
         except TimeoutError:
             params["_disaster_model_error"] = f"model inference timed out after {timeout_seconds:.0f}s"
             return None
@@ -273,7 +273,9 @@ class RemoteSensingTool(BaseTool):
 
     def _collect_image_paths(self, tool_input: ToolInput) -> tuple[list[Path], list[str]]:
         raw_values: list[Any] = []
+        query_values: list[Any] = []
         uploaded_path_by_name: dict[str, str] = {}
+        has_uploaded_images = False
         params = tool_input.params or {}
         for key in ("image_path", "image_paths", "remote_sensing_path", "remote_sensing_paths", "file_path", "file_paths"):
             if key in params:
@@ -283,33 +285,48 @@ class RemoteSensingTool(BaseTool):
             uploaded_name = file_info.get("name") or file_info.get("filename") or Path(str(uploaded_path or "")).name
             if not self._looks_like_image_file(file_info, uploaded_path, uploaded_name):
                 continue
+            has_uploaded_images = True
             if uploaded_path and uploaded_name:
                 uploaded_path_by_name[str(uploaded_name).lower()] = str(uploaded_path)
             raw_values.append(uploaded_path)
-        raw_values.extend(match.group(1) for match in IMAGE_PATH_PATTERN.finditer(tool_input.query or ""))
+        query_values.extend(match.group(1) for match in IMAGE_PATH_PATTERN.finditer(tool_input.query or ""))
 
         paths: list[Path] = []
         invalid: list[str] = []
         for item in self._flatten(raw_values):
-            if isinstance(item, dict):
-                item = item.get("path") or item.get("file_path")
-            if item is None or str(item).strip() == "":
-                continue
-            raw_item = str(item).strip()
-            candidate_item = self._normalize_candidate_path(raw_item)
-            uploaded_match = uploaded_path_by_name.get(Path(candidate_item).name.lower())
-            path = self._resolve_existing_path(uploaded_match or candidate_item)
-            if path is None:
-                if uploaded_match or (paths and Path(candidate_item).name.lower() in uploaded_path_by_name):
-                    continue
-                invalid.append(raw_item)
-                continue
-            if path.suffix.lower() not in IMAGE_EXTENSIONS:
-                invalid.append(raw_item)
-                continue
-            paths.append(path)
+            self._append_resolved_image_path(item, uploaded_path_by_name, paths, invalid, ignore_missing=False)
+        for item in self._flatten(query_values):
+            self._append_resolved_image_path(item, uploaded_path_by_name, paths, invalid, ignore_missing=has_uploaded_images)
 
         return list(dict.fromkeys(paths)), list(dict.fromkeys(invalid))
+
+    def _append_resolved_image_path(
+        self,
+        item: Any,
+        uploaded_path_by_name: dict[str, str],
+        paths: list[Path],
+        invalid: list[str],
+        *,
+        ignore_missing: bool,
+    ) -> None:
+        if isinstance(item, dict):
+            item = item.get("path") or item.get("file_path")
+        if item is None or str(item).strip() == "":
+            return
+        raw_item = str(item).strip()
+        candidate_item = self._normalize_candidate_path(raw_item)
+        uploaded_match = uploaded_path_by_name.get(Path(candidate_item).name.lower())
+        path = self._resolve_existing_path(uploaded_match or candidate_item)
+        if path is None:
+            if ignore_missing or uploaded_match or Path(candidate_item).name.lower() in uploaded_path_by_name:
+                return
+            invalid.append(raw_item)
+            return
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            if not ignore_missing:
+                invalid.append(raw_item)
+            return
+        paths.append(path)
 
     def _looks_like_image_file(self, file_info: dict[str, Any], path: Any, name: Any) -> bool:
         value = " ".join(
@@ -326,10 +343,10 @@ class RemoteSensingTool(BaseTool):
         return value.startswith("image/") or "image" in value or suffix in IMAGE_EXTENSIONS
 
     def _normalize_candidate_path(self, raw_path: str) -> str:
-        value = raw_path.strip().strip('"\'`[]()<>')
+        value = raw_path.strip().strip('"\'`[]()<>,;，；、。')
         if not re.match(r"^[A-Za-z]:[\\/]", value) and ("：" in value or ":" in value):
             value = re.split(r"[:：]", value)[-1].strip()
-        return value.strip().strip('"\'`[]()<>')
+        return value.strip().strip('"\'`[]()<>,;，；、。')
 
     def _resolve_existing_path(self, raw_path: str) -> Path | None:
         path = Path(raw_path).expanduser()
@@ -428,12 +445,12 @@ class RemoteSensingTool(BaseTool):
             return default
         return parsed if parsed > 0 else default
 
-    def _positive_float(self, value: Any) -> float | None:
+    def _positive_float(self, value: Any, default: float | None = None) -> float | None:
         try:
             parsed = float(value)
         except (TypeError, ValueError):
-            return None
-        return parsed if parsed > 0 else None
+            return default
+        return parsed if parsed > 0 else default
 
     def _estimate_confidence(self, affected_ratio: float, params: dict[str, Any]) -> float:
         base = 0.58

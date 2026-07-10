@@ -12,7 +12,7 @@
 cd backend
 pip install -r requirements.txt
 cp ../.env.example ../.env   # 填写 .env 配置
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
 
 ### 前端
@@ -185,7 +185,7 @@ python scripts/preprocess_population_cache.py --reset --stride 420 --max-samples
 ```bash
 conda activate ml
 cd backend
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
 
 前端：
