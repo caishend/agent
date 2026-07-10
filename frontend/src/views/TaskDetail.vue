@@ -95,6 +95,12 @@
               <button class="solid-button inline" @click="confirmDraftFromMessage(item)">确认保留</button>
             </div>
 
+            <div v-if="item.needEmailConfirm" class="confirm-box">
+              <span>确认发送这封邮件？</span>
+              <button class="solid-button inline" @click="confirmEmailFromMessage(item)">确认发送</button>
+              <button class="ghost-button inline" @click="item.needEmailConfirm = false">暂不发送</button>
+            </div>
+
             <div v-if="item.needReportFormat" class="confirm-box">
               <span>请选择报告导出格式：</span>
               <button class="solid-button inline" @click="chooseReportFormat(item, 'docx')">Word</button>
@@ -106,21 +112,35 @@
 
       <aside class="simple-side-panel">
         <section class="record-card">
-          <div class="rail-title">本次对话记录</div>
+          <div class="rail-title record-title-row">
+            <span>本次对话记录</span>
+            <button
+              v-if="conversationRecord.trim()"
+              class="ghost-button tiny"
+              type="button"
+              @click="recordPreviewMode = !recordPreviewMode"
+            >
+              {{ recordPreviewMode ? '编辑' : '预览' }}
+            </button>
+          </div>
+          <div
+            v-if="recordPreviewMode"
+            class="record-editor record-preview-surface markdown-body"
+            v-html="renderMarkdown(conversationRecord || '暂无保存内容')"
+          />
           <textarea
+            v-else
             v-model="conversationRecord"
             class="record-editor"
             placeholder="可编辑保存：关键信息、已确认事实、后续需要进入灾害分析/报告的信息。"
           />
           <div class="record-actions">
             <button class="ghost-button" @click="generateRecord">从对话生成</button>
-            <button class="solid-button inline" @click="saveRecord">保存</button>
+            <button class="solid-button inline" :disabled="recordSaving" @click="saveRecord">
+              {{ recordSaving ? '保存中' : '保存' }}
+            </button>
           </div>
-          <small v-if="recordSavedAt">已保存 {{ recordSavedAt }}</small>
-          <details v-if="conversationRecord.trim()" class="record-preview">
-            <summary>预览保存内容</summary>
-            <div class="markdown-body" v-html="renderMarkdown(conversationRecord)" />
-          </details>
+          <small v-if="recordSavedAt">{{ recordSavedAt }}</small>
         </section>
 
         <section class="upload-card">
@@ -249,6 +269,8 @@ const selectedTool = ref(null)
 const toolMenuOpen = ref(false)
 const conversationRecord = ref('')
 const recordSavedAt = ref('')
+const recordSaving = ref(false)
+const recordPreviewMode = ref(false)
 const deletingDocumentKey = ref('')
 const removedRelatedFilePaths = ref(new Set())
 const typingState = new Map()
@@ -279,7 +301,10 @@ async function loadTaskState() {
   await loadUploadedDocuments()
   await loadChatHistory()
   conversationRecord.value = session.value.conversation_record || localStorage.getItem(recordKey.value) || ''
-  recordSavedAt.value = ''
+  recordPreviewMode.value = false
+  recordSavedAt.value = session.value.conversation_record
+    ? `已从数据库恢复${formatRecordSavedAt(session.value.conversation_record_saved_at)}`
+    : ''
 }
 
 async function loadUploadedDocuments() {
@@ -566,6 +591,11 @@ async function handleStreamEvent(event, progressMessage) {
         needConfirm: true
       })
     }
+    if (event.need_user_confirm && event.data?.email_status === 'pending_confirmation' && event.data?.email_draft) {
+      progressMessage.emailDraft = event.data.email_draft
+      progressMessage.needEmailConfirm = true
+      progressMessage.content = event.content || '请确认是否发送这封邮件。'
+    }
     progressMessage.traceOpen = true
     await scrollToBottom()
     return
@@ -663,6 +693,52 @@ async function upload(event) {
     content: `已接入 ${uploadedBatch.map(file => `**${file.filename}**`).join('、')}，后续研究、灾害分析和报告都会自动带上这些文件。`
   })
   event.target.value = ''
+}
+
+async function confirmEmailFromMessage(item) {
+  if (!item.emailDraft || loading.value) return
+  item.needEmailConfirm = false
+  messages.value.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    title: '用户 · 邮件确认',
+    content: '确认发送邮件'
+  })
+
+  loading.value = true
+  const progressMessage = {
+    id: crypto.randomUUID(),
+    role: 'agent',
+    title: 'Agent · 发送邮件中',
+    content: '已确认，正在发送邮件...',
+    requestText: item.requestText || '确认发送邮件',
+    progress: ['用户已确认邮件草稿，准备调用邮件工具...'],
+    traceOpen: true,
+    searchResults: [],
+    artifacts: []
+  }
+  messages.value.push(progressMessage)
+  await scrollToBottom()
+
+  try {
+    await streamAgentMessage(taskId.value, {
+      message: '确认发送邮件',
+      files: [],
+      params: {
+        forced_tool: 'email',
+        confirm_email: true,
+        email_draft: item.emailDraft
+      }
+    }, async event => {
+      await handleStreamEvent(event, progressMessage)
+    })
+  } catch (error) {
+    progressMessage.title = 'Agent · 发送失败'
+    progressMessage.content = error?.response?.data?.detail || error.message || '邮件发送失败。'
+  } finally {
+    loading.value = false
+    await scrollToBottom()
+  }
 }
 
 async function uploadSelectedFiles(files) {
@@ -821,6 +897,7 @@ async function clearSession() {
   localStorage.removeItem(recordKey.value)
   conversationRecord.value = ''
   recordSavedAt.value = ''
+  recordPreviewMode.value = false
 }
 
 function chooseTool(tool) {
@@ -834,6 +911,8 @@ function generateRecord() {
     .map(formatRecordItem)
     .filter(Boolean)
     .join('\n\n---\n\n')
+  recordPreviewMode.value = false
+  recordSavedAt.value = '已生成，尚未保存到数据库'
 }
 
 function formatRecordItem(item) {
@@ -865,10 +944,28 @@ function formatRecordItem(item) {
 }
 
 async function saveRecord() {
-  localStorage.setItem(recordKey.value, conversationRecord.value)
-  await saveAgentRecord(taskId.value, conversationRecord.value)
-  session.value.conversation_record = conversationRecord.value
-  recordSavedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  recordSaving.value = true
+  try {
+    localStorage.setItem(recordKey.value, conversationRecord.value)
+    const result = await saveAgentRecord(taskId.value, conversationRecord.value)
+    session.value.conversation_record = result.conversation_record ?? conversationRecord.value
+    session.value.conversation_record_saved_at = result.saved_at
+    recordSavedAt.value = `已保存到数据库${formatRecordSavedAt(result.saved_at)}`
+  } finally {
+    recordSaving.value = false
+  }
+}
+
+function formatRecordSavedAt(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return ` · ${date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })}`
 }
 
 function renderMarkdown(content) {

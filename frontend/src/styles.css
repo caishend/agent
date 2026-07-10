@@ -270,6 +270,11 @@ textarea { resize: none; }
   background: var(--panel-soft);
 }
 
+.ghost-button.tiny {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
 .message-panel {
   min-height: 0;
   overflow: auto;
@@ -521,6 +526,7 @@ textarea { resize: none; }
 }
 
 .markdown-body pre {
+  max-width: 100%;
   overflow: auto;
   padding: 12px;
   border-radius: 12px;
@@ -1016,7 +1022,9 @@ textarea { resize: none; }
 }
 
 .simple-side-panel {
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 14px;
@@ -1027,7 +1035,9 @@ textarea { resize: none; }
 
 .record-card,
 .upload-card {
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   padding: 14px;
@@ -1037,8 +1047,12 @@ textarea { resize: none; }
 }
 
 .record-editor {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   flex: 1;
   min-height: 220px;
+  max-height: 420px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1046,6 +1060,8 @@ textarea { resize: none; }
   color: var(--text);
   background: #fbfbfa;
   line-height: 1.65;
+  overflow: auto;
+  resize: vertical;
 }
 
 .record-editor:focus {
@@ -1057,6 +1073,31 @@ textarea { resize: none; }
   justify-content: flex-end;
   gap: 8px;
   margin-top: 10px;
+}
+
+.record-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.record-preview-surface {
+  max-width: 100%;
+  font-size: 13px;
+  resize: none;
+}
+
+.record-preview-surface pre,
+.record-preview-surface table {
+  max-width: 100%;
+}
+
+.record-preview-surface p,
+.record-preview-surface li,
+.record-preview-surface td,
+.record-preview-surface th {
+  overflow-wrap: anywhere;
 }
 
 .record-preview {
@@ -1096,6 +1137,7 @@ textarea { resize: none; }
 }
 
 .uploaded-list {
+  min-width: 0;
   display: grid;
   gap: 8px;
   margin-top: 10px;

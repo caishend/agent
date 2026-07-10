@@ -196,7 +196,9 @@ def get_agent_session(
 ):
     _get_task_or_404(task_id, user_id, db)
     metadata = session_store.metadata_for(task_id)
-    metadata.setdefault("conversation_record", _load_conversation_record(db, task_id))
+    record_payload = _load_conversation_record_payload(db, task_id)
+    metadata.setdefault("conversation_record", record_payload["content"])
+    metadata.setdefault("conversation_record_saved_at", record_payload["saved_at"])
     return {"task_id": task_id, "session": metadata}
 
 
@@ -209,9 +211,11 @@ def save_conversation_record(
 ):
     _get_task_or_404(task_id, user_id, db)
     content = data.content.strip()
-    _save_tool_record(db, task_id, {"kind": "conversation_record", "content": content})
-    session_store.metadata_for(task_id)["conversation_record"] = content
-    return {"task_id": task_id, "conversation_record": content}
+    saved_at = _save_tool_record(db, task_id, {"kind": "conversation_record", "content": content})
+    metadata = session_store.metadata_for(task_id)
+    metadata["conversation_record"] = content
+    metadata["conversation_record_saved_at"] = saved_at
+    return {"task_id": task_id, "conversation_record": content, "saved_at": saved_at}
 
 
 @router.delete("/{task_id}/agent/session", status_code=204)
@@ -299,7 +303,7 @@ def _update_tool_record(db: Session, row: Conversation, payload: dict[str, Any])
         db.rollback()
 
 
-def _save_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> None:
+def _save_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> str | None:
     kind = payload.get("kind")
     if kind == "conversation_record":
         existing_rows = (
@@ -313,10 +317,13 @@ def _save_tool_record(db: Session, task_id: int, payload: dict[str, Any]) -> Non
                 if json.loads(row.content or "{}").get("kind") == "conversation_record":
                     row.content = json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str)
                     db.commit()
-                    return
+                    db.refresh(row)
+                    return row.created_at.isoformat() if row.created_at else None
             except json.JSONDecodeError:
                 continue
-    _save_message(db, task_id, "tool", json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str))
+    row_id = _save_message(db, task_id, "tool", json.dumps(_compact_trace_payload(payload), ensure_ascii=False, default=str))
+    row = db.query(Conversation).filter(Conversation.conv_id == row_id).first()
+    return row.created_at.isoformat() if row and row.created_at else None
 
 
 def _compact_trace_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -371,6 +378,10 @@ def _summarize_trace_data(data: Any) -> Any:
 
 
 def _load_conversation_record(db: Session, task_id: int) -> str:
+    return _load_conversation_record_payload(db, task_id)["content"]
+
+
+def _load_conversation_record_payload(db: Session, task_id: int) -> dict[str, str | None]:
     rows = (
         db.query(Conversation)
         .filter(Conversation.task_id == task_id, Conversation.role == "tool")
@@ -383,8 +394,11 @@ def _load_conversation_record(db: Session, task_id: int) -> str:
         except json.JSONDecodeError:
             continue
         if payload.get("kind") == "conversation_record":
-            return str(payload.get("content") or "")
-    return ""
+            return {
+                "content": str(payload.get("content") or ""),
+                "saved_at": row.created_at.isoformat() if row.created_at else None,
+            }
+    return {"content": "", "saved_at": None}
 
 
 def _with_conversation_history(db: Session, task_id: int, params: dict[str, Any]) -> dict[str, Any]:

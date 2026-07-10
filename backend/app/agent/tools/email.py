@@ -23,7 +23,7 @@ EMAIL_PATTERN = re.compile(
 
 class EmailTool(BaseTool):
     name = "email"
-    description = "通过 SMTP 将报告、预警结论或通知发送到指定邮箱。"
+    description = "通过 SMTP 将报告、预警结论或通知发送到指定邮箱。默认先生成草稿，用户确认后才真正发送。"
 
     def __init__(
         self,
@@ -35,12 +35,22 @@ class EmailTool(BaseTool):
 
     def run(self, tool_input: ToolInput, context: ToolContext | None = None) -> ToolResult:
         params = tool_input.params or {}
+        draft_from_params = params.get("email_draft") if isinstance(params.get("email_draft"), dict) else {}
 
-        recipients, invalid_recipients = self._collect_recipients(params, tool_input.query, "recipients", "to")
+        recipients, invalid_recipients = self._collect_recipients(
+            params,
+            tool_input.query,
+            "recipients",
+            "to",
+        )
         cc, invalid_cc = self._collect_recipients(params, "", "cc")
         bcc, invalid_bcc = self._collect_recipients(params, "", "bcc")
-        invalid_all = invalid_recipients + invalid_cc + invalid_bcc
+        if draft_from_params:
+            recipients = recipients or self._as_string_list(draft_from_params.get("recipients"))
+            cc = cc or self._as_string_list(draft_from_params.get("cc"))
+            bcc = bcc or self._as_string_list(draft_from_params.get("bcc"))
 
+        invalid_all = invalid_recipients + invalid_cc + invalid_bcc
         if invalid_all:
             return self._needs_user_input(
                 "邮件发送失败：存在格式不合法的邮箱地址，请重新提供有效收件人邮箱。",
@@ -53,6 +63,36 @@ class EmailTool(BaseTool):
                 "missing_recipients",
             )
 
+        attachments, attachment_error = self._collect_attachments(tool_input)
+        if attachment_error:
+            return self._failed(attachment_error, "invalid_attachments")
+
+        subject = self._clean_header(
+            params.get("subject") or draft_from_params.get("subject") or self._default_subject(context)
+        )
+        body = str(
+            params.get("body")
+            or params.get("content")
+            or params.get("message")
+            or draft_from_params.get("body")
+            or tool_input.query
+        ).strip()
+        if not body:
+            body = "SkyGuard 灾害分析通知，请查看附件或任务详情。"
+
+        draft = {
+            "recipients": recipients,
+            "cc": cc,
+            "bcc": bcc,
+            "subject": subject,
+            "body": body,
+            "attachments": [str(path) for path in attachments],
+            "attachment_names": [path.name for path in attachments],
+        }
+
+        if not self._is_confirmed(params):
+            return self._draft_result(draft)
+
         missing_config = self._missing_smtp_config()
         if missing_config:
             return self._failed(
@@ -61,22 +101,13 @@ class EmailTool(BaseTool):
                 missing_config=missing_config,
             )
 
-        attachments, attachment_error = self._collect_attachments(tool_input)
-        if attachment_error:
-            return self._failed(attachment_error, "invalid_attachments")
-
-        subject = self._clean_header(params.get("subject") or self._default_subject(context))
-        body = str(params.get("body") or params.get("content") or params.get("message") or tool_input.query).strip()
-        if not body:
-            body = "SkyGuard 灾害分析通知，请查看附件或任务详情。"
-
         try:
             message = self._build_message(
                 recipients=recipients,
                 cc=cc,
                 subject=subject,
                 body=body,
-                html_body=params.get("html_body"),
+                html_body=params.get("html_body") or draft_from_params.get("html_body"),
                 attachments=attachments,
             )
             all_recipients = recipients + cc + bcc
@@ -113,6 +144,25 @@ class EmailTool(BaseTool):
                 "subject": subject,
                 "attachments": [str(path) for path in attachments],
             },
+        )
+
+    def _draft_result(self, draft: dict[str, Any]) -> ToolResult:
+        attachment_text = "、".join(draft["attachment_names"]) if draft["attachment_names"] else "无"
+        cc_text = f"\n- 抄送：{'、'.join(draft['cc'])}" if draft["cc"] else ""
+        bcc_text = f"\n- 密送：{len(draft['bcc'])} 个收件人" if draft["bcc"] else ""
+        summary = (
+            "请确认是否发送以下邮件：\n\n"
+            f"- 收件人：{'、'.join(draft['recipients'])}"
+            f"{cc_text}{bcc_text}\n"
+            f"- 主题：{draft['subject']}\n"
+            f"- 附件：{attachment_text}\n\n"
+            f"正文预览：\n{draft['body'][:1000]}"
+        )
+        return ToolResult(
+            summary=summary,
+            confidence=1.0,
+            need_user_confirm=True,
+            data={"email_status": "pending_confirmation", "email_draft": draft},
         )
 
     def _send(self, message: EmailMessage, recipients: list[str]) -> None:
@@ -202,9 +252,12 @@ class EmailTool(BaseTool):
     def _collect_attachments(self, tool_input: ToolInput) -> tuple[list[Path], str | None]:
         raw_values: list[Any] = []
         params = tool_input.params or {}
+        draft = params.get("email_draft") if isinstance(params.get("email_draft"), dict) else {}
         for key in ("attachments", "attachment_paths", "file_paths", "report_path"):
             if key in params:
                 raw_values.append(params[key])
+        if draft.get("attachments"):
+            raw_values.append(draft["attachments"])
         for file_info in tool_input.files:
             raw_values.append(file_info.get("path") or file_info.get("file_path"))
 
@@ -247,6 +300,9 @@ class EmailTool(BaseTool):
         text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
         return text or "SkyGuard 灾害分析通知"
 
+    def _is_confirmed(self, params: dict[str, Any]) -> bool:
+        return bool(params.get("confirm_email") or params.get("confirmed_email") or params.get("email_confirmed"))
+
     def _needs_user_input(self, summary: str, reason: str, **extra: Any) -> ToolResult:
         return ToolResult(
             summary=summary,
@@ -261,6 +317,9 @@ class EmailTool(BaseTool):
             confidence=0.0,
             data={"email_status": "failed", "reason": reason, **extra},
         )
+
+    def _as_string_list(self, value: Any) -> list[str]:
+        return [str(item).strip() for item in self._flatten([value]) if str(item).strip()]
 
     def _flatten(self, values: Iterable[Any]) -> Iterable[Any]:
         for value in values:

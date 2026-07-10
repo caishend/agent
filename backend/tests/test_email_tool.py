@@ -82,7 +82,7 @@ class EmailToolTest(unittest.TestCase):
         settings.SMTP_PASSWORD = ""
 
         result = EmailTool(smtp_factory=FakeSMTP).run(
-            ToolInput(query="请发送给 ops@example.com"),
+            ToolInput(query="请发送给 ops@example.com", params={"confirm_email": True}),
             ToolContext(task_id=1),
         )
 
@@ -92,7 +92,25 @@ class EmailToolTest(unittest.TestCase):
         self.assertIn("SMTP_FROM", result.data["missing_config"])
         self.assertEqual(FakeSMTP.instances, [])
 
-    def test_sends_email_through_configured_smtp(self):
+    def test_recipient_present_returns_draft_before_send(self):
+        self._configure_smtp()
+
+        result = EmailTool(smtp_factory=FakeSMTP).run(
+            ToolInput(
+                query="发送预警给 ops@example.com",
+                params={"subject": "洪水预警", "body": "请查看最新灾害分析结论。"},
+            ),
+            ToolContext(task_id=9),
+        )
+
+        self.assertEqual(result.data["email_status"], "pending_confirmation")
+        self.assertTrue(result.need_user_confirm)
+        self.assertEqual(result.data["email_draft"]["recipients"], ["ops@example.com"])
+        self.assertEqual(result.data["email_draft"]["subject"], "洪水预警")
+        self.assertEqual(result.data["email_draft"]["body"], "请查看最新灾害分析结论。")
+        self.assertEqual(FakeSMTP.instances, [])
+
+    def test_sends_email_after_user_confirmation(self):
         self._configure_smtp()
         tool = EmailTool(smtp_factory=FakeSMTP)
 
@@ -103,6 +121,7 @@ class EmailToolTest(unittest.TestCase):
                     "recipients": ["ops@example.com"],
                     "subject": "洪水预警",
                     "body": "请查看最新灾害分析结论。",
+                    "confirm_email": True,
                 },
             ),
             ToolContext(task_id=9),

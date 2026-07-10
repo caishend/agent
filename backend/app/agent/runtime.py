@@ -306,6 +306,8 @@ def _prepare_tool_input(
         if metadata.get("conversation_record") and "summary" not in params:
             params["summary"] = metadata["conversation_record"]
     if tool_name == "email":
+        if params.get("confirm_email") and metadata.get("pending_email_draft") and "email_draft" not in params:
+            params["email_draft"] = metadata["pending_email_draft"]
         if metadata.get("last_report_path") and "report_path" not in params:
             params["report_path"] = metadata["last_report_path"]
         if metadata.get("last_report_path") and "attachments" not in params:
@@ -385,7 +387,11 @@ def _needs_web_search_fallback(results: dict[str, ToolResult]) -> bool:
 def _should_stop_for_user_input(tool_name: str, result: ToolResult) -> bool:
     if tool_name != "email":
         return False
-    return bool(result.need_user_confirm or result.data.get("reason") in {"missing_recipients", "invalid_recipients"})
+    return bool(
+        result.need_user_confirm
+        or result.data.get("reason") in {"missing_recipients", "invalid_recipients"}
+        or result.data.get("email_status") == "sent"
+    )
 
 
 def _update_session_from_result(
@@ -408,6 +414,10 @@ def _update_session_from_result(
         metadata["risk_assessment"] = result.data["assessment"]
     if tool_name == "report" and result.data.get("report_path"):
         metadata["last_report_path"] = result.data["report_path"]
+    if tool_name == "email" and result.data.get("email_status") == "pending_confirmation":
+        metadata["pending_email_draft"] = result.data.get("email_draft")
+    if tool_name == "email" and result.data.get("email_status") == "sent":
+        metadata.pop("pending_email_draft", None)
 
 
 def _tool_result_event(tool_name: str, result: ToolResult) -> dict[str, Any]:
