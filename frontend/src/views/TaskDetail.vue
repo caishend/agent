@@ -231,6 +231,8 @@ import {
 
 marked.setOptions({ breaks: true, gfm: true })
 
+const artifactBaseUrl = (import.meta.env.VITE_API_ORIGIN || 'http://127.0.0.1:8000').replace(/\/$/, '')
+
 const route = useRoute()
 const taskId = computed(() => route.params.id)
 const recordKey = computed(() => `skyguard:conversation-record:${taskId.value}`)
@@ -906,11 +908,18 @@ function progressIcon(step, index, total) {
 function artifactUrl(artifact) {
   const normalized = String(artifact.path || '').replaceAll('\\', '/')
   const filename = normalized.split('/').pop()
-  if (artifact.type === 'screenshot' && filename) return `/artifacts/screenshots/${filename}`
-  if (artifact.type === 'report' && filename) return `/artifacts/reports/${filename}`
+  if (artifact.type === 'screenshot' && filename) return artifactAssetUrl(`/artifacts/screenshots/${filename}`)
+  if (artifact.type === 'report' && filename) return artifactAssetUrl(`/artifacts/reports/${filename}`)
   if ((artifact.type === 'remote_sensing_overlay' || artifact.type === 'object_detection') && normalized.includes('data/remote_sensing/')) {
-    return normalized.replace(/^.*data\/remote_sensing\//, '/artifacts/remote-sensing/')
+    return artifactAssetUrl(normalized.replace(/^.*data\/remote_sensing\//, '/artifacts/remote-sensing/'))
   }
+  return artifactAssetUrl(normalized)
+}
+
+function artifactAssetUrl(path) {
+  const normalized = String(path || '').replaceAll('\\', '/')
+  if (normalized.startsWith('http://') || normalized.startsWith('https://')) return normalized
+  if (normalized.startsWith('/artifacts/')) return `${artifactBaseUrl}${normalized}`
   return normalized
 }
 
@@ -955,9 +964,9 @@ function displayArtifacts(artifacts = []) {
 function fileUrl(file) {
   if (file.artifact) return artifactUrl(file.artifact)
   const normalized = String(file.file_path || '').replaceAll('\\', '/')
-  if (normalized.startsWith('data/uploads/')) return `/artifacts/uploads/${normalized.slice('data/uploads/'.length)}`
-  if (normalized.startsWith('data/reports/')) return `/artifacts/reports/${normalized.split('/').pop()}`
-  return normalized.startsWith('/artifacts/') ? normalized : normalized
+  if (normalized.startsWith('data/uploads/')) return artifactAssetUrl(`/artifacts/uploads/${normalized.slice('data/uploads/'.length)}`)
+  if (normalized.startsWith('data/reports/')) return artifactAssetUrl(`/artifacts/reports/${normalized.split('/').pop()}`)
+  return artifactAssetUrl(normalized)
 }
 
 function isUploadedImage(file) {
