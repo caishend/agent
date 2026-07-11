@@ -21,6 +21,7 @@ backend/data/*.zip
 backend/data/**/*.zip
 knowledge/output/
 backend/app/agent/models/weights/
+docs/
 
 # 前端构建
 frontend/dist/

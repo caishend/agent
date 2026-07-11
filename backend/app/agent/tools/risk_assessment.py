@@ -28,8 +28,8 @@ class RiskAssessmentTool(BaseTool):
         formal_memory = self._load_formal_memory(tool_input, context)
         if not self._is_confirmed_memory(formal_memory):
             return ToolResult(
-                summary="尚未发现已确认的正式任务记忆，请先确认临时草稿后再进行风险评估。",
-                need_user_confirm=True,
+                summary="尚未发现可用于评估的任务信息，无法计算风险等级。",
+                need_user_confirm=False,
                 confidence=0.35,
                 data={"assessment_status": "missing_confirmed_memory"},
             )
@@ -185,7 +185,7 @@ class RiskAssessmentTool(BaseTool):
 
     def _suggestions(self, disaster_type: str, risk_level: str) -> list[str]:
         suggestions = [
-            "持续补充官方预警、现场反馈、遥感识别和文档证据。",
+            "持续核查官方预警、现场反馈、遥感识别和文档证据。",
             "对低洼区、交通节点、医院学校等重点对象进行优先核查。",
         ]
         if disaster_type == "暴雨洪涝":
@@ -213,10 +213,15 @@ class RiskAssessmentTool(BaseTool):
         return round(max(0.35, min(0.92, confidence)), 2)
 
     def _build_summary(self, assessment: dict[str, Any]) -> str:
-        return (
-            f"风险等级：{assessment['risk_level']}；"
-            f"风险评分：{assessment['risk_score']:.2f}；"
-            f"主要因素：{'、'.join(assessment['risk_factors']) or '证据不足'}。"
+        basis = assessment.get("basis") or []
+        suggestions = assessment.get("suggestions") or []
+        return "\n".join(
+            [
+                f"最终风险评估：{assessment['risk_level']}（评分 {assessment['risk_score']:.2f}）。",
+                f"评估依据：{'；'.join(str(item) for item in basis[:4]) if basis else '当前证据不足，已按现有位置、时间、文档和检索结果进行保守评估。'}",
+                f"主要风险因素：{'；'.join(str(item) for item in assessment['risk_factors'][:4]) if assessment['risk_factors'] else '暂无明确高权重风险因素。'}",
+                f"处置建议：{'；'.join(str(item) for item in suggestions[:3]) if suggestions else '建议结合现场情况复核。'}",
+            ]
         )
 
     def _shorten(self, content: str, limit: int = 36) -> str:

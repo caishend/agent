@@ -97,7 +97,7 @@ class ReportTool(BaseTool):
             or analysis.get("summary")
             or task.get("conversation_summary")
             or tool_input.query
-            or "系统根据已确认任务信息、风险评估结果和证据链生成本报告。"
+            or "系统根据已登记任务信息、风险评估结果和证据链生成本报告。"
         )
 
         risk_score = params.get("risk_score", analysis.get("risk_score"))
@@ -259,8 +259,8 @@ class ReportTool(BaseTool):
         )
 
         self._add_section(story, "1. 摘要", payload["summary"], heading, normal)
-        self._add_list_section(story, "2. 已确认信息", payload["known_info"], heading, normal, empty="暂无已确认信息。")
-        self._add_list_section(story, "3. 缺失信息与待核验假设", payload["missing_info"], heading, normal, empty="暂无缺失信息。")
+        self._add_list_section(story, "2. 已识别信息", payload["known_info"], heading, normal, empty="暂无已识别信息。")
+        self._add_list_section(story, "3. 未识别或待核验信息", payload["missing_info"], heading, normal, empty="暂无未识别信息。")
         self._add_list_section(story, "4. 综合风险原因", payload["reasons"], heading, normal, empty="暂无结构化风险原因。")
         self._add_list_section(story, "5. 应急响应建议", payload["suggestions"], heading, normal)
         self._add_evidence_section(story, payload["evidence"], heading, normal, colors)
@@ -283,11 +283,11 @@ class ReportTool(BaseTool):
             "1. 摘要",
             payload["summary"],
             "",
-            "2. 已确认信息",
-            *self._numbered_lines(payload["known_info"], "暂无已确认信息。"),
+            "2. 已识别信息",
+            *self._numbered_lines(payload["known_info"], "暂无已识别信息。"),
             "",
-            "3. 缺失信息与待核验假设",
-            *self._numbered_lines(payload["missing_info"], "暂无缺失信息。"),
+            "3. 未识别或待核验信息",
+            *self._numbered_lines(payload["missing_info"], "暂无未识别信息。"),
             "",
             "4. 综合风险原因",
             *self._numbered_lines(payload["reasons"], "暂无结构化风险原因。"),
@@ -373,11 +373,11 @@ class ReportTool(BaseTool):
             "1. 摘要",
             payload["summary"],
             "",
-            "2. 已确认信息",
-            *self._numbered_lines(payload["known_info"], "暂无已确认信息。"),
+            "2. 已识别信息",
+            *self._numbered_lines(payload["known_info"], "暂无已识别信息。"),
             "",
-            "3. 缺失信息与待核验假设",
-            *self._numbered_lines(payload["missing_info"], "暂无缺失信息。"),
+            "3. 未识别或待核验信息",
+            *self._numbered_lines(payload["missing_info"], "暂无未识别信息。"),
             "",
             "4. 综合风险原因",
             *self._numbered_lines(payload["reasons"], "暂无结构化风险原因。"),

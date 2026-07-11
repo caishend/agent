@@ -4,7 +4,6 @@
       <div>
         <div class="eyebrow">Operational Overview</div>
         <h1 class="page-title">全国灾害态势总览</h1>
-        <p class="page-desc">总览页只读取数据库、GraphRAG 表与本地 GeoJSON / 人口 GeoTIFF，不再展示“全部任务图谱”假入口。</p>
       </div>
       <div class="overview-actions">
         <button class="btn secondary" @click="reloadAll">刷新态势</button>
@@ -64,7 +63,7 @@
             <div class="eyebrow">Disaster Registry</div>
             <h2>灾害事件与影响人口</h2>
           </div>
-          <span class="status-pill">{{ selectedEvent ? `当前：${selectedEvent.event_name}` : '点击行切换图谱' }}</span>
+          <span class="status-pill">{{ selectedEvent ? `当前：${displayEventName(selectedEvent)}` : '点击行切换图谱' }}</span>
         </div>
         <div class="overview-table-wrap">
           <table class="overview-table">
@@ -86,19 +85,19 @@
                 :class="{ active: isSelectedEvent(event) }"
                 @click="selectEvent(event)"
               >
-                <td>
+                <td class="event-main-cell">
                   <RouterLink v-if="event.task_id" :to="`/tasks/${event.task_id}`" @click.stop>
-                    {{ event.event_name }}
+                    {{ displayEventName(event) }}
                   </RouterLink>
-                  <span v-else>{{ event.event_name }}</span>
-                  <small>{{ event.summary || '暂无摘要，完成灾害分析后会自动同步。' }}</small>
+                  <span v-else>{{ displayEventName(event) }}</span>
+                  <small>{{ displayEventSummary(event) || '暂无摘要，完成灾害分析后会自动同步。' }}</small>
                 </td>
-                <td>{{ event.city || event.province || event.location_name || '待定位' }}</td>
+                <td>{{ event.city || event.province || event.location_name || '未定位' }}</td>
                 <td>{{ event.disaster_type || '未知' }}</td>
-                <td><span class="risk-badge" :class="riskClass(event.risk_level)">{{ event.risk_level || '待评估' }}</span></td>
-                <td>{{ event.population_density ? `${Math.round(event.population_density)} 人/km²` : '待匹配' }}</td>
-                <td>{{ formatPopulation(event.estimated_affected_population || 0) }}</td>
-                <td>{{ event.report_path ? '已生成' : '未生成' }}</td>
+                <td><span class="risk-badge" :class="riskClass(event.risk_level)">{{ displayRiskLevel(event.risk_level) }}</span></td>
+                <td class="numeric-cell">{{ event.population_density ? `${Math.round(event.population_density)} 人/km²` : '待匹配' }}</td>
+                <td class="numeric-cell highlight">{{ formatPopulation(event.estimated_affected_population || 0) }}</td>
+                <td><span class="report-chip" :class="{ ok: event.report_path }">{{ event.report_path ? '已生成' : '未生成' }}</span></td>
               </tr>
               <tr v-if="!events.length">
                 <td colspan="7" class="empty-cell">暂无灾害事件。创建任务或完成灾害分析后，这里会从数据库自动出现。</td>
@@ -109,7 +108,7 @@
         <div class="metric-explain">
           <div>
             <strong>风险</strong>
-            <span>来自灾害分析/任务状态：未完成为“待评估”，完成灾害分析后由 Agent 风险评估写入等级。</span>
+            <span>来自灾害分析工具：未运行风险评估时显示“未评估”，完成后写入低/中/高/极高风险。</span>
           </div>
           <div>
             <strong>人口密度</strong>
@@ -155,7 +154,7 @@ const selectedEvent = computed(() => {
     return selectedEventId.value && String(event.event_id) === selectedEventId.value
   })
 })
-const graphTitle = computed(() => selectedEvent.value ? `任务图谱：${selectedEvent.value.event_name}` : '请选择一个灾害任务')
+const graphTitle = computed(() => selectedEvent.value ? `任务图谱：${displayEventName(selectedEvent.value)}` : '请选择一个灾害任务')
 const graphStats = computed(() => {
   const graph = overview.value.knowledge_graph || { nodes: [], links: [] }
   return `${graph.nodes?.length || 0} 节点 / ${graph.links?.length || 0} 关系`
@@ -188,7 +187,10 @@ async function reloadAll() {
 }
 
 async function loadOverview(graphTaskId = selectedEventTaskId.value) {
-  overview.value = await getOverviewSummary(graphTaskId ? { graph_task_id: graphTaskId, graph_limit: 45 } : { graph_limit: 45 })
+  const params = graphTaskId
+    ? { graph_task_id: graphTaskId, graph_limit: 45 }
+    : { graph_task_id: -1, graph_limit: 45 }
+  overview.value = await getOverviewSummary(params)
   await nextTick()
   renderCharts()
 }
@@ -225,7 +227,7 @@ function renderMapChart() {
   const eventData = events.value
     .filter(item => item.longitude && item.latitude)
     .map(item => ({
-      name: item.event_name,
+      name: displayEventName(item),
       value: [
         Number(item.longitude),
         Number(item.latitude),
@@ -245,9 +247,9 @@ function renderMapChart() {
         if (params.seriesName === '灾害事件') {
           const event = params.data.event
           return [
-            '<strong>' + event.event_name + '</strong>',
-            (event.city || event.province || '待定位') + ' · ' + (event.disaster_type || '未知'),
-            '风险：' + (event.risk_level || '待评估'),
+            '<strong>' + displayEventName(event) + '</strong>',
+            (event.city || event.province || '未定位') + ' · ' + (event.disaster_type || '未知'),
+            '风险：' + displayRiskLevel(event.risk_level),
             '人口密度：' + (event.population_density ? Math.round(event.population_density) : '待估') + ' 人/km²',
             '影响人口：' + formatPopulation(event.estimated_affected_population || 0),
           ].join('<br/>')
@@ -390,6 +392,49 @@ function riskClass(level) {
   if (level === '中风险') return 'medium'
   if (level === '低风险') return 'low'
   return 'pending'
+}
+
+function displayRiskLevel(level) {
+  if (!level || level === '待评估') return '未评估'
+  return level
+}
+
+function displayEventName(event) {
+  return cleanRegistryText(event?.event_name) || '未命名灾害事件'
+}
+
+function displayEventSummary(event) {
+  return cleanRegistryText(event?.summary)
+}
+
+function cleanRegistryText(value) {
+  let text = String(value || '').trim()
+  const replacements = {
+    待确认时间: '',
+    待确认区域: '',
+    待确认灾害类型: '灾害',
+    待确认灾害: '灾害',
+    待补充时间: '',
+    待补充区域: '',
+    待补充灾害类型: '灾害',
+    未识别时间: '',
+    未识别区域: '',
+    未识别灾害类型: '灾害',
+    分析任务草稿: '分析任务',
+    任务草稿: '任务',
+    灾害态势库: '灾害事件登记表',
+    文害态势库: '灾害事件登记表',
+    已进入: '已同步到',
+    已确认灾害类型: '识别灾害类型',
+    已确认影响区域: '识别影响区域',
+    已确认时间范围: '识别时间范围',
+    待评估: '未评估',
+    待定位区域: '未定位'
+  }
+  Object.entries(replacements).forEach(([from, to]) => {
+    text = text.replaceAll(from, to)
+  })
+  return text.replace(/\s{2,}/g, ' ').replace(/[，,；;。]+$/g, '').trim()
 }
 
 function formatPopulation(value) {

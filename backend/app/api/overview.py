@@ -202,18 +202,18 @@ def _ensure_events_from_tasks(db: Session, user_id: int) -> None:
         db.add(
             DisasterEvent(
                 task_id=task.task_id,
-                event_name=task.task_name,
+                event_name=_clean_event_display_text(task.task_name),
                 disaster_type=disaster_type or "未知",
                 province=location.get("province"),
                 city=location.get("city"),
-                location_name=task.location or location.get("city") or location.get("province") or "待定位区域",
+                location_name=task.location or location.get("city") or location.get("province") or "未定位",
                 longitude=location.get("lng"),
                 latitude=location.get("lat"),
                 risk_level=risk_level,
                 severity_score=RISK_SCORE.get(risk_level, 0.4),
                 status=_event_status_from_task(task.status),
                 event_time=task.create_time or datetime.utcnow(),
-                summary=f"由任务《{task.task_name}》自动生成的灾害态势事件。",
+                summary=f"由任务《{task.task_name}》同步生成的灾害事件登记记录。",
                 source_type="task",
                 confidence=0.65 if location else 0.45,
             )
@@ -352,18 +352,18 @@ def _event_payload(event: DisasterEvent) -> dict[str, Any]:
     return {
         "event_id": event.event_id,
         "task_id": event.task_id,
-        "event_name": event.event_name,
+        "event_name": _clean_event_display_text(event.event_name),
         "disaster_type": event.disaster_type,
         "province": event.province,
         "city": event.city,
         "district": event.district,
-        "location_name": event.location_name,
+        "location_name": _clean_event_display_text(event.location_name),
         "longitude": event.longitude,
         "latitude": event.latitude,
         "risk_level": event.risk_level,
         "severity_score": event.severity_score,
         "status": event.status,
-        "summary": event.summary,
+        "summary": _clean_event_display_text(event.summary),
         "confidence": event.confidence,
         "report_path": event.report_path,
         "population_density": event.population_density,
@@ -372,6 +372,39 @@ def _event_payload(event: DisasterEvent) -> dict[str, Any]:
         "event_time": event.event_time.isoformat() if event.event_time else None,
         "updated_at": event.updated_at.isoformat() if event.updated_at else None,
     }
+
+
+def _clean_event_display_text(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    replacements = {
+        "待确认时间": "",
+        "待确认区域": "",
+        "待确认灾害类型": "灾害",
+        "待确认灾害": "灾害",
+        "待补充时间": "",
+        "待补充区域": "",
+        "待补充灾害类型": "灾害",
+        "未识别时间": "",
+        "未识别区域": "",
+        "未识别灾害类型": "灾害",
+        "分析任务草稿": "分析任务",
+        "任务草稿": "任务",
+        "灾害态势库": "灾害事件登记表",
+        "文害态势库": "灾害事件登记表",
+        "已进入": "已同步到",
+        "已确认灾害类型": "识别灾害类型",
+        "已确认影响区域": "识别影响区域",
+        "已确认时间范围": "识别时间范围",
+        "待评估": "未评估",
+        "待定位区域": "未定位",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip(" ，,；;。")
 
 
 def _population_payload(row: PopulationDensity | AdminPopulationStat) -> dict[str, Any]:
@@ -630,7 +663,7 @@ def sync_event_from_agent_session(db: Session, task_id: int, metadata: dict[str,
         event = DisasterEvent(task_id=task_id, event_name=task.task_name)
         db.add(event)
 
-    event.event_name = formal_memory.get("title") or task.task_name
+    event.event_name = _clean_event_display_text(formal_memory.get("title") or task.task_name)
     event.disaster_type = disaster_type or "未知"
     event.province = location.get("province") or event.province
     event.city = location.get("city") or event.city
@@ -656,7 +689,7 @@ def _session_summary(task: Task, formal_memory: dict[str, Any], assessment: dict
     basis = assessment.get("basis") or []
     suggestions = assessment.get("suggestions") or []
     parts = [
-        f"任务《{task.task_name}》已进入灾害态势库。",
+        f"任务《{task.task_name}》已同步到灾害事件登记表。",
         f"灾害类型：{formal_memory.get('disaster_type') or task.disaster_type or '未知'}。",
     ]
     if assessment.get("risk_level"):

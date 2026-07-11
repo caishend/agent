@@ -9,7 +9,7 @@ class TaskDraftToolTest(unittest.TestCase):
         self.tool = TaskDraftTool()
         self.context = ToolContext(task_id=3, user_id=8, conversation_id=21)
 
-    def test_builds_confirmable_draft_from_disaster_query(self):
+    def test_builds_registerable_task_info_from_disaster_query(self):
         result = self.tool.run(
             ToolInput(query="请分析成都今天暴雨洪涝灾害风险，并给出应急建议"),
             self.context,
@@ -17,8 +17,8 @@ class TaskDraftToolTest(unittest.TestCase):
 
         draft = result.data["draft"]
 
-        self.assertTrue(result.need_user_confirm)
-        self.assertEqual(draft["status"], "pending_user_confirmation")
+        self.assertFalse(result.need_user_confirm)
+        self.assertEqual(draft["status"], "ready_to_register")
         self.assertEqual(draft["disaster_type"], "暴雨洪涝")
         self.assertEqual(draft["locations"], ["成都"])
         self.assertEqual(draft["time_range"], "今天")

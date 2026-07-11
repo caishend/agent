@@ -62,7 +62,7 @@ class ToolResult:
             if sources:
                 lines.append(f"证据来源：{'、'.join(sources)}")
         if self.need_user_confirm:
-            lines.append("需要用户确认后再写入正式任务记忆。")
+            lines.append("需要用户确认后继续执行。")
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
