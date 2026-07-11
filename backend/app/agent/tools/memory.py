@@ -9,7 +9,7 @@ from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResu
 
 class MemoryTool(BaseTool):
     name = "memory"
-    description = "在用户确认后，将临时任务草稿中的必要信息写入正式任务记忆。"
+    description = "将整理出的任务信息直接写入正式任务记忆。"
 
     default_persisted_fields = (
         "title",
@@ -29,18 +29,18 @@ class MemoryTool(BaseTool):
 
         if not draft:
             return ToolResult(
-                summary="未收到可写入的临时任务草稿，请先生成并确认草稿。",
-                need_user_confirm=True,
+                summary="未收到可写入的任务信息。",
+                need_user_confirm=False,
                 confidence=0.3,
                 data={"memory_status": "missing_draft"},
             )
 
         if not confirmed:
             return ToolResult(
-                summary="临时任务草稿尚未确认，暂不写入正式任务记忆。",
-                need_user_confirm=True,
+                summary="用户明确要求不保存，本轮任务信息未写入记忆。",
+                need_user_confirm=False,
                 confidence=0.75,
-                data={"memory_status": "waiting_user_confirmation", "draft": draft},
+                data={"memory_status": "skipped_by_user", "draft": draft},
             )
 
         formal_memory = self._build_formal_memory(
@@ -53,20 +53,17 @@ class MemoryTool(BaseTool):
             context.metadata["confirmed_task"] = True
 
         return ToolResult(
-            summary=f"已写入正式任务记忆：{formal_memory.get('title', '未命名任务')}。",
+            summary=f"已登记任务信息：{formal_memory.get('title', '未命名任务')}。",
             need_user_confirm=False,
             confidence=0.88,
             data={"memory_status": "persisted", "formal_memory": formal_memory},
         )
 
     def _is_confirmed(self, query: str, params: dict[str, Any]) -> bool:
-        if params.get("confirmed") or params.get("confirmed_task") or params.get("task_confirmed"):
-            return True
         rejection_words = ("先别", "不要", "暂不", "别保存", "不保存", "别写入")
         if any(word in query for word in rejection_words):
             return False
-        confirmation_words = ("确认", "已确认", "保留", "保存", "可以开始", "写入")
-        return any(word in query for word in confirmation_words)
+        return True
 
     def _build_formal_memory(
         self,

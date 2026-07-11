@@ -1,4 +1,4 @@
-"""临时任务草稿工具。"""
+"""任务信息整理工具。"""
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -9,7 +9,7 @@ from app.agent.tools.base_tool import BaseTool, ToolContext, ToolInput, ToolResu
 
 class TaskDraftTool(BaseTool):
     name = "task_draft"
-    description = "基于本轮对话整理临时任务草稿，等待用户确认哪些信息需要保留。"
+    description = "基于本轮对话整理任务信息，用于直接写入任务记忆。"
 
     disaster_patterns = (
         ("暴雨洪涝", ("暴雨洪涝", "洪涝", "洪水", "内涝", "暴雨")),
@@ -78,7 +78,7 @@ class TaskDraftTool(BaseTool):
         missing_info = self._find_missing_info(disaster_type, locations, time_range)
 
         draft = {
-            "status": "pending_user_confirmation",
+            "status": "ready_to_register",
             "title": self._build_title(disaster_type, locations, time_range),
             "disaster_type": disaster_type,
             "locations": locations,
@@ -96,7 +96,7 @@ class TaskDraftTool(BaseTool):
 
         return ToolResult(
             summary=self._build_summary(draft),
-            need_user_confirm=True,
+            need_user_confirm=False,
             confidence=self._estimate_confidence(missing_info),
             data={"draft": draft},
         )
@@ -165,17 +165,17 @@ class TaskDraftTool(BaseTool):
         locations: list[str],
         time_range: str,
     ) -> str:
-        location_text = "、".join(locations) if locations else "待确认区域"
-        disaster_text = disaster_type if disaster_type != "未知" else "待确认灾害"
-        time_text = time_range if time_range != "未知" else "待确认时间"
-        return f"{location_text}{time_text}{disaster_text}分析任务草稿"
+        location_text = "、".join(locations) if locations else ""
+        time_text = time_range if time_range != "未知" else ""
+        disaster_text = disaster_type if disaster_type != "未知" else "灾害"
+        return f"{location_text}{time_text}{disaster_text}分析任务" or "灾害分析任务"
 
     def _build_summary(self, draft: dict[str, Any]) -> str:
         missing_text = "、".join(draft["missing_info"]) if draft["missing_info"] else "无"
         return (
-            f"已生成临时任务草稿：{draft['title']}。"
-            f"请确认需要保留的信息；仍缺少：{missing_text}。"
-            "确认前不会写入正式任务记忆。"
+            f"已整理任务信息：{draft['title']}。"
+            f"未识别字段：{missing_text}。"
+            "系统会按当前可识别信息直接登记。"
         )
 
     def _estimate_confidence(self, missing_info: list[str]) -> float:

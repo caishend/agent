@@ -31,14 +31,14 @@ class MemoryToolTest(unittest.TestCase):
             "source_message": "请分析成都今天暴雨洪涝灾害风险",
         }
 
-    def test_rejects_unconfirmed_draft(self):
+    def test_skips_persistence_when_user_explicitly_rejects_saving(self):
         result = self.tool.run(
             ToolInput(query="先别保存", params={"draft": self.draft}),
             self.context,
         )
 
-        self.assertEqual(result.data["memory_status"], "waiting_user_confirmation")
-        self.assertTrue(result.need_user_confirm)
+        self.assertEqual(result.data["memory_status"], "skipped_by_user")
+        self.assertFalse(result.need_user_confirm)
         self.assertNotIn("formal_memory", self.context.metadata)
 
     def test_persists_confirmed_draft_into_context_memory(self):

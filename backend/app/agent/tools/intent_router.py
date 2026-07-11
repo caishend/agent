@@ -277,7 +277,7 @@ class IntentRouterTool(BaseTool):
 
     def _infer_next_step(self, primary_intent: str, tools: list[str], need_user_confirm: bool) -> str:
         if need_user_confirm:
-            return "confirm_task_draft"
+            return "answer"
         if "email" in tools:
             return "send_email"
         if "report" in tools:
@@ -329,7 +329,7 @@ class IntentRouterTool(BaseTool):
                 "need_user_confirm": False,
             }
         if forced_tool == "task_draft":
-            return {"tools": ["task_draft"], "next_step": "confirm_task_draft", "need_user_confirm": True}
+            return {"tools": ["task_draft", "memory"], "next_step": "answer", "need_user_confirm": False}
         if forced_tool == "report":
             return {"tools": ["report"], "next_step": "generate_report", "need_user_confirm": False}
         if forced_tool == "email":

@@ -200,7 +200,7 @@ def iter_agent_events(
             yield _tool_result_event(tool_name, result)
             if _should_stop_for_user_input(tool_name, result):
                 yield {"type": "answer", "content": result.summary}
-                yield {"type": "done", "content": "等待用户补充信息", "session": metadata}
+                yield {"type": "done", "content": "等待用户输入", "session": metadata}
                 return
         except Exception as error:
             yield {
@@ -249,6 +249,7 @@ def iter_agent_events(
             "error": str(error),
         }
 
+    answer = _append_risk_assessment_appendix(answer, results)
     yield {"type": "answer", "content": answer}
     yield {"type": "done", "content": "完成", "session": metadata}
 
@@ -263,7 +264,7 @@ def confirm_task_draft(
     context = ToolContext(task_id=task_id, user_id=user_id, metadata=metadata)
     result = MemoryTool().run(
         ToolInput(
-            query="确认保留这些任务信息",
+            query="登记这些任务信息",
             params={"draft": draft, "confirmed": True, "selected_fields": selected_fields},
         ),
         context,
@@ -473,6 +474,32 @@ def _tool_result_event(tool_name: str, result: ToolResult) -> dict[str, Any]:
         "artifacts": [item.__dict__ for item in result.artifacts],
         "need_user_confirm": result.need_user_confirm,
     }
+
+
+def _append_risk_assessment_appendix(answer: str, results: dict[str, ToolResult]) -> str:
+    result = results.get("risk_assessment")
+    assessment = (result.data.get("assessment") if result else None) or {}
+    if not isinstance(assessment, dict) or not assessment.get("risk_level"):
+        return answer
+    if "最终风险评估" in answer and "评估依据" in answer:
+        return answer
+
+    basis = [str(item) for item in (assessment.get("basis") or []) if str(item).strip()]
+    factors = [str(item) for item in (assessment.get("risk_factors") or []) if str(item).strip()]
+    suggestions = [str(item) for item in (assessment.get("suggestions") or []) if str(item).strip()]
+    lines = [
+        "",
+        "---",
+        "### 最终风险评估",
+        f"- **风险等级**：{assessment.get('risk_level')}（评分 {float(assessment.get('risk_score') or 0):.2f}）",
+        f"- **评估依据**：{'；'.join(basis[:4]) if basis else '当前证据不足，已按现有位置、时间、文档和检索结果进行保守评估。'}",
+    ]
+    if factors:
+        lines.append(f"- **主要风险因素**：{'；'.join(factors[:4])}")
+    if suggestions:
+        lines.append(f"- **处置建议**：{'；'.join(suggestions[:3])}")
+    return f"{answer.rstrip()}\n{chr(10).join(lines)}"
+
 
 def synthesize_answer(
     message: str,

@@ -177,6 +177,7 @@ def _answer_system_prompt() -> str:
         "你必须基于工具结果、对话历史和已知上下文回答。"
         "conversation_history 是同一任务下最近对话，必须用于回答身份、偏好、前文指代等记忆问题。"
         "如果信息不足，要明确说明缺口；禁止编造不存在的事实。"
+        "如果工具结果包含 risk_assessment，最终回复必须明确写出风险等级、风险评分、评估依据和处置建议。"
         "回答使用 Markdown，结构清晰、简洁、专业。"
     )
 
@@ -211,6 +212,7 @@ def _answer_user_prompt(
         "请根据下面 JSON 上下文生成最终回复。"
         "如果用户问“我是谁”“我刚才说了什么”等问题，优先从 conversation_history 中找答案。"
         "如果 conversation_history 里有用户自述姓名或偏好，应该承认并复述；不要要求用户重新登录。\n"
+        "如果 tool_results.risk_assessment 存在，必须保留其中的 risk_level、risk_score、basis、risk_factors 和 suggestions，不要只泛泛总结。\n"
         f"{_safe_json(payload)}"
     )
 

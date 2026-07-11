@@ -90,11 +90,6 @@
               </div>
             </details>
 
-            <div v-if="item.needConfirm" class="confirm-box">
-              <span>这些信息是否需要保留到正式任务记忆？</span>
-              <button class="solid-button inline" @click="confirmDraftFromMessage(item)">确认保留</button>
-            </div>
-
             <div v-if="item.needEmailConfirm" class="confirm-box">
               <span>确认发送这封邮件？</span>
               <button class="solid-button inline" @click="confirmEmailFromMessage(item)">确认发送</button>
@@ -132,7 +127,7 @@
             v-else
             v-model="conversationRecord"
             class="record-editor"
-            placeholder="可编辑保存：关键信息、已确认事实、后续需要进入灾害分析/报告的信息。"
+            placeholder="可编辑保存：关键信息、事实依据、后续需要进入灾害分析/报告的信息。"
           />
           <div class="record-actions">
             <button class="ghost-button" @click="generateRecord">从对话生成</button>
@@ -591,15 +586,14 @@ async function handleStreamEvent(event, progressMessage) {
       addArtifactsToRelatedFiles(event.artifacts)
       if (event.artifacts.some(artifact => artifact.type === 'report')) loadUploadedDocuments()
     }
-    if (event.need_user_confirm && event.data?.draft) {
+    if (event.data?.draft) {
       messages.value.push({
         id: crypto.randomUUID(),
         role: 'agent',
-        title: 'Agent',
-        content: '我识别到你可能要进行灾害分析。下面是根据本轮对话生成的临时信息草稿，请确认哪些信息需要保留。',
+        title: 'Agent · 任务信息已整理',
+        content: '系统已根据本轮对话整理任务信息，并按当前可识别内容直接登记。',
         data: event.data.draft,
-        draft: event.data.draft,
-        needConfirm: true
+        draft: event.data.draft
       })
     }
     if (event.need_user_confirm && event.data?.email_status === 'pending_confirmation' && event.data?.email_draft) {
@@ -691,8 +685,8 @@ async function confirmDraftFromMessage(item) {
   messages.value.push({
     id: crypto.randomUUID(),
     role: 'agent',
-    title: 'Agent · 已确认',
-    content: '已写入正式任务记忆。后续可以继续要求风险评估、生成报告或邮件发送。'
+    title: 'Agent · 已登记',
+    content: '已登记任务信息。后续可以继续要求风险评估、生成报告或邮件发送。'
   })
 }
 
