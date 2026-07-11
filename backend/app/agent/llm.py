@@ -74,9 +74,14 @@ def stream_llm_answer(
 ) -> Iterator[str]:
     if not is_llm_configured():
         raise LLMUnavailableError("LLM 未配置：请设置 OPENAI_API_KEY 和 LLM_MODEL")
+    yielded_content = False
     try:
-        yield from _stream_with_langchain(message, results, metadata)
+        for chunk in _stream_with_langchain(message, results, metadata):
+            yielded_content = True
+            yield chunk
     except Exception:
+        if yielded_content:
+            raise
         yield from _stream_with_httpx(message, results, metadata)
 
 

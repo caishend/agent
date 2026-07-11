@@ -225,7 +225,7 @@
 <script setup>
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AppShell from '../components/AppShell.vue'
 import {
@@ -491,7 +491,7 @@ async function runAgent() {
   pendingFiles.value = []
   toolMenuOpen.value = false
   loading.value = true
-  const progressMessage = {
+  const progressMessage = reactive({
     id: crypto.randomUUID(),
     role: 'agent',
     title: 'Agent · 执行中',
@@ -501,7 +501,7 @@ async function runAgent() {
     traceOpen: true,
     searchResults: [],
     artifacts: []
-  }
+  })
   messages.value.push(progressMessage)
   await scrollToBottom()
   startStreamFallbackPolling(progressMessage)
@@ -517,6 +517,7 @@ async function runAgent() {
       await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
+    cleanupTyping(progressMessage)
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = error?.response?.data?.detail || error.message || '调用失败，请检查后端服务。'
   } finally {
@@ -558,7 +559,7 @@ async function handleStreamEvent(event, progressMessage) {
       progressMessage.content = ''
       progressMessage.streamingAnswerStarted = true
     }
-    progressMessage.content += event.content || ''
+    enqueueAnswerDelta(progressMessage, event.content || '')
     await scrollToBottom()
     await nextTick()
     return
@@ -610,9 +611,7 @@ async function handleStreamEvent(event, progressMessage) {
     progressMessage.title = 'Agent'
     progressMessage.traceOpen = false
     const finalContent = event.content || progressMessage.content || '已完成。'
-    cleanupTyping(progressMessage)
-    progressMessage.content = finalContent
-    progressMessage.streamingAnswerStarted = false
+    finishTyping(progressMessage, finalContent)
     await scrollToBottom()
     return
   }
@@ -624,6 +623,7 @@ async function handleStreamEvent(event, progressMessage) {
   }
 
   if (event.type === 'error') {
+    cleanupTyping(progressMessage)
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = event.content || event.error || '调用失败。'
     progressMessage.traceOpen = true
@@ -642,7 +642,7 @@ async function chooseReportFormat(item, format) {
   })
 
   loading.value = true
-  const progressMessage = {
+  const progressMessage = reactive({
     id: crypto.randomUUID(),
     role: 'agent',
     title: 'Agent · 生成报告中',
@@ -652,7 +652,7 @@ async function chooseReportFormat(item, format) {
     traceOpen: true,
     searchResults: [],
     artifacts: []
-  }
+  })
   messages.value.push(progressMessage)
   await scrollToBottom()
 
@@ -669,6 +669,7 @@ async function chooseReportFormat(item, format) {
       await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
+    cleanupTyping(progressMessage)
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = error?.response?.data?.detail || error.message || '报告生成失败。'
   } finally {
@@ -715,7 +716,7 @@ async function confirmEmailFromMessage(item) {
   })
 
   loading.value = true
-  const progressMessage = {
+  const progressMessage = reactive({
     id: crypto.randomUUID(),
     role: 'agent',
     title: 'Agent · 发送邮件中',
@@ -725,7 +726,7 @@ async function confirmEmailFromMessage(item) {
     traceOpen: true,
     searchResults: [],
     artifacts: []
-  }
+  })
   messages.value.push(progressMessage)
   await scrollToBottom()
 
@@ -742,6 +743,7 @@ async function confirmEmailFromMessage(item) {
       await handleStreamEvent(event, progressMessage)
     })
   } catch (error) {
+    cleanupTyping(progressMessage)
     progressMessage.title = 'Agent · 发送失败'
     progressMessage.content = error?.response?.data?.detail || error.message || '邮件发送失败。'
   } finally {
@@ -1146,7 +1148,7 @@ function enqueueAnswerDelta(messageItem, text) {
   if (!text) return
   let state = typingState.get(messageItem.id)
   if (!state) {
-    state = { queue: '', timer: null, finalContent: '' }
+    state = { queue: '', timer: null, finalContent: null }
     typingState.set(messageItem.id, state)
   }
   state.queue += text
@@ -1155,14 +1157,15 @@ function enqueueAnswerDelta(messageItem, text) {
       const current = typingState.get(messageItem.id)
       if (!current) return
       if (!current.queue.length) {
-        if (current.finalContent) {
+        if (current.finalContent !== null) {
           messageItem.content = current.finalContent
           cleanupTyping(messageItem)
         }
         return
       }
-      const chunk = current.queue.slice(0, 2)
-      current.queue = current.queue.slice(2)
+      const chunkSize = Math.max(2, Math.ceil(current.queue.length / 80))
+      const chunk = current.queue.slice(0, chunkSize)
+      current.queue = current.queue.slice(chunkSize)
       messageItem.content += chunk
       scrollToBottom()
     }, 18)

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-import time
 from typing import Any
 
 from app.agent.llm import stream_llm_answer
@@ -238,7 +237,6 @@ def iter_agent_events(
             for visible_chunk in _chunk_text(chunk):
                 yielded_delta = True
                 yield {"type": "answer_delta", "content": visible_chunk}
-                time.sleep(0.01)
         if not yielded_delta:
             raise RuntimeError("LLM 未返回可流式输出内容")
     except Exception as error:
@@ -248,6 +246,8 @@ def iter_agent_events(
             "content": f"LLM 调用失败，已降级为工具摘要：{error}",
             "error": str(error),
         }
+        for visible_chunk in _chunk_text(answer):
+            yield {"type": "answer_delta", "content": visible_chunk}
 
     answer = _append_risk_assessment_appendix(answer, results)
     yield {"type": "answer", "content": answer}

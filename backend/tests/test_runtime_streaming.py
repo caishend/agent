@@ -28,6 +28,27 @@ class RuntimeStreamingTest(unittest.TestCase):
         self.assertEqual("".join(deltas), "第一段第二段")
         self.assertEqual(final_answers[-1], "第一段第二段")
 
+    def test_llm_fallback_is_also_emitted_as_answer_delta_events(self):
+        with patch("app.agent.runtime.stream_llm_answer", side_effect=RuntimeError("offline")), patch(
+            "app.agent.runtime.synthesize_answer",
+            return_value="fallback answer",
+        ):
+            events = list(
+                iter_agent_events(
+                    task_id=902,
+                    user_id=1,
+                    message="question",
+                    files=[],
+                    params={"disable_llm_router": True},
+                )
+            )
+
+        deltas = [event["content"] for event in events if event.get("type") == "answer_delta"]
+        final_answers = [event["content"] for event in events if event.get("type") == "answer"]
+
+        self.assertEqual("".join(deltas), "fallback answer")
+        self.assertEqual(final_answers[-1], "fallback answer")
+
     def test_disaster_analysis_does_not_request_report_format(self):
         fake_result = ToolResult(
             summary="ok",
