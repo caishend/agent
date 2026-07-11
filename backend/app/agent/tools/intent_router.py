@@ -131,7 +131,7 @@ class IntentRouterTool(BaseTool):
                 "document_qa": "针对上传 PDF/DOCX/TXT/MD 等文档，使用 document；必要时再 graphrag。",
                 "browser": "需要最新、实时、网页、公告、预警、浏览器搜索或截图时使用 browser。",
                 "remote_sensing": "图像识别、遥感、卫星影像、水体/淹没区域识别使用 remote_sensing。",
-                "disaster_analysis": "灾害分析/灾害评估只允许调用 browser、graphrag、risk_assessment；不要生成报告。只有明确要求生成/导出报告时才调用 report。",
+                "disaster_analysis": "灾害分析/灾害评估只允许调用 browser、graphrag、risk_assessment；不要生成报告。只有明确要求生成/导出报告时才调用 report。注意：解释灾害原因、为什么发生、形成机制属于知识问答/文档问答，不属于风险评估，不要调用 risk_assessment。",
                 "graphrag": "GraphRAG 只检索当前任务上传的文档；知识图谱构建由上传/删除文档接口后台完成，不要在对话中构建图谱。",
                 "email": "发送邮件或通知调用 email。",
             },
@@ -461,6 +461,8 @@ def _router_system_prompt() -> str:
         "普通问答可以 tools=[]。工具只能从 available_tools 中选择。"
         "如果用户只是要求网页搜索、最新信息或截图，tools 只能包含 browser。"
         "灾害分析/灾害评估不等于生成报告，只能使用 browser、graphrag、risk_assessment。"
+        "如果用户只是询问灾害原因、为什么发生、形成机制、如何导致等解释型问题，应视为知识问答/文档问答，只使用 document/graphrag，不要调用 risk_assessment。"
+        "只有用户明确要求风险评估、灾害评估、风险等级、影响人口、处置建议或正式分析时，才允许调用 risk_assessment。"
         "只有用户明确说生成报告、导出报告、Word、PDF 时，才允许 tools 包含 report。"
         "报告生成只负责整合已保存对话记录和当前任务相关文档，不要规划联网搜索或风险评估。"
         "GraphRAG 只用于检索当前任务上传的文档；不要规划知识图谱构建工具。"

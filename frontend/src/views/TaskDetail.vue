@@ -619,6 +619,9 @@ async function handleStreamEvent(event, progressMessage) {
   if (event.type === 'done') {
     session.value = event.session || session.value
     progressMessage.traceOpen = false
+    stopStreamFallbackPolling()
+    loading.value = false
+    await scrollToBottom()
     return
   }
 
@@ -627,6 +630,8 @@ async function handleStreamEvent(event, progressMessage) {
     progressMessage.title = 'Agent · 调用失败'
     progressMessage.content = event.content || event.error || '调用失败。'
     progressMessage.traceOpen = true
+    stopStreamFallbackPolling()
+    loading.value = false
     await scrollToBottom()
   }
 }

@@ -157,14 +157,21 @@ def iter_agent_events(
     yield {"type": "thinking", "content": "正在识别意图并规划工具调用..."}
     router_result = IntentRouterTool().run(tool_input, context)
     tools_to_run = router_result.data.get("tools", [])
-    if _has_image_file(tool_input.files) and "remote_sensing" not in tools_to_run:
-        tools_to_run = ["remote_sensing", *tools_to_run]
-    if params.get("forced_tool") not in {"remote_sensing", "disaster_analysis", "report"}:
-        tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
-    tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
+    forced_tool = str(params.get("forced_tool") or "")
+
+    if forced_tool == "browser":
+        tools_to_run = ["browser"]
+    else:
+        if _has_image_file(tool_input.files) and "remote_sensing" not in tools_to_run:
+            tools_to_run = ["remote_sensing", *tools_to_run]
+        if not forced_tool:
+            tools_to_run = _ensure_document_rag_fallback(tools_to_run, tool_input)
+        tools_to_run = _sanitize_tools_for_request(tools_to_run, tool_input.query)
     tools_to_run = _remove_runtime_graph_ingest(tools_to_run)
     router_data = dict(router_result.data or {})
     router_data["tools"] = tools_to_run
+    if "risk_assessment" not in tools_to_run and router_data.get("next_step") == "run_risk_assessment":
+        router_data["next_step"] = "answer"
 
     if "report" in tools_to_run and not (params.get("report_format") or params.get("format")):
         metadata["pending_report_request"] = {
@@ -374,7 +381,20 @@ def _sanitize_tools_for_request(tools: list[str], query: str) -> list[str]:
     normalized_query = (query or "").lower()
     screenshot_or_search = any(
         keyword in normalized_query
-        for keyword in ("截图", "截屏", "网页图", "页面图", "搜索", "最新", "预警", "screenshot")
+        for keyword in (
+            "截图",
+            "截屏",
+            "截一张",
+            "截个图",
+            "帮我截",
+            "网页图",
+            "页面图",
+            "图片",
+            "搜索",
+            "最新",
+            "预警",
+            "screenshot",
+        )
     )
     analysis_or_report = any(
         keyword in normalized_query
@@ -382,7 +402,48 @@ def _sanitize_tools_for_request(tools: list[str], query: str) -> list[str]:
     )
     if screenshot_or_search and not analysis_or_report:
         return [tool for tool in tools if tool == "browser"] or ["browser"]
+    if _is_explanation_request(normalized_query) and not _is_explicit_risk_request(normalized_query):
+        sanitized = [tool for tool in tools if tool != "risk_assessment"]
+        if "graphrag" not in sanitized:
+            sanitized.append("graphrag")
+        return sanitized
     return tools
+
+
+def _is_explanation_request(normalized_query: str) -> bool:
+    return any(
+        keyword in normalized_query
+        for keyword in (
+            "为什么",
+            "原因",
+            "解释",
+            "形成机制",
+            "形成原因",
+            "怎么发生",
+            "如何发生",
+            "导致",
+            "成因",
+        )
+    )
+
+
+def _is_explicit_risk_request(normalized_query: str) -> bool:
+    return any(
+        keyword in normalized_query
+        for keyword in (
+            "风险评估",
+            "灾害评估",
+            "评估风险",
+            "风险等级",
+            "风险评分",
+            "影响人口",
+            "受灾人口",
+            "处置建议",
+            "应急建议",
+            "正式分析",
+            "开始评估",
+        )
+    )
 
 
 def _remove_runtime_graph_ingest(tools: list[str]) -> list[str]:

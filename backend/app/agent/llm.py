@@ -218,6 +218,7 @@ def _answer_user_prompt(
         "如果用户问“我是谁”“我刚才说了什么”等问题，优先从 conversation_history 中找答案。"
         "如果 conversation_history 里有用户自述姓名或偏好，应该承认并复述；不要要求用户重新登录。\n"
         "如果 tool_results.risk_assessment 存在，必须保留其中的 risk_level、risk_score、basis、risk_factors 和 suggestions，不要只泛泛总结。\n"
+        "如果 tool_results.browser.artifacts 中存在 type=screenshot 的产物，必须明确告诉用户截图已生成，并给出截图路径和来源 URL；禁止回答无法截图。\n"
         f"{_safe_json(payload)}"
     )
 

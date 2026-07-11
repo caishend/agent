@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import mimetypes
+import json
 import re
 import smtplib
 from collections.abc import Callable, Iterable
@@ -10,6 +11,7 @@ from email.utils import formataddr, getaddresses
 from pathlib import Path
 from typing import Any
 
+from app.agent.llm import complete_llm_json
 from app.agent.tools.base_tool import ArtifactItem, BaseTool, EvidenceItem, ToolContext, ToolInput, ToolResult
 from app.config import settings
 
@@ -67,18 +69,13 @@ class EmailTool(BaseTool):
         if attachment_error:
             return self._failed(attachment_error, "invalid_attachments")
 
-        subject = self._clean_header(
-            params.get("subject") or draft_from_params.get("subject") or self._default_subject(context)
+        subject, body, draft_source = self._compose_draft_content(
+            tool_input=tool_input,
+            context=context,
+            params=params,
+            draft_from_params=draft_from_params,
+            attachments=attachments,
         )
-        body = str(
-            params.get("body")
-            or params.get("content")
-            or params.get("message")
-            or draft_from_params.get("body")
-            or tool_input.query
-        ).strip()
-        if not body:
-            body = "SkyGuard 灾害分析通知，请查看附件或任务详情。"
 
         draft = {
             "recipients": recipients,
@@ -86,6 +83,7 @@ class EmailTool(BaseTool):
             "bcc": bcc,
             "subject": subject,
             "body": body,
+            "draft_source": draft_source,
             "attachments": [str(path) for path in attachments],
             "attachment_names": [path.name for path in attachments],
         }
@@ -275,6 +273,124 @@ class EmailTool(BaseTool):
             paths.append(path.resolve())
 
         return list(dict.fromkeys(paths)), None
+
+
+
+    def _compose_draft_content(
+        self,
+        *,
+        tool_input: ToolInput,
+        context: ToolContext | None,
+        params: dict[str, Any],
+        draft_from_params: dict[str, Any],
+        attachments: list[Path],
+    ) -> tuple[str, str, str]:
+        explicit_subject = (
+            params.get("subject")
+            or draft_from_params.get("subject")
+            or self._extract_labeled_value(tool_input.query, ("\u90ae\u4ef6\u4e3b\u9898", "\u4e3b\u9898", "subject"))
+        )
+        explicit_body = (
+            params.get("body")
+            or params.get("content")
+            or params.get("message")
+            or draft_from_params.get("body")
+            or self._extract_labeled_value(tool_input.query, ("\u90ae\u4ef6\u6b63\u6587", "\u6b63\u6587", "\u90ae\u4ef6\u5185\u5bb9", "\u5185\u5bb9", "body"))
+        )
+
+        subject = self._clean_header(explicit_subject or "")
+        body = str(explicit_body or "").strip()
+        has_explicit_subject = bool(str(explicit_subject or "").strip())
+        has_explicit_body = bool(body)
+        if has_explicit_subject and has_explicit_body:
+            return subject, body, "user_specified"
+
+        generated = self._generate_email_draft_with_llm(
+            query=tool_input.query,
+            context=context,
+            attachments=attachments,
+            subject_hint=subject,
+            body_hint=body,
+        )
+        if generated:
+            return (
+                self._clean_header(subject or generated.get("subject") or self._default_subject(context)),
+                str(body or generated.get("body") or "").strip() or self._fallback_body(context, attachments),
+                "llm_generated",
+            )
+
+        return (
+            self._clean_header(subject or self._default_subject(context)),
+            body or self._fallback_body(context, attachments),
+            "template_fallback",
+        )
+
+    def _generate_email_draft_with_llm(
+        self,
+        *,
+        query: str,
+        context: ToolContext | None,
+        attachments: list[Path],
+        subject_hint: str,
+        body_hint: str,
+    ) -> dict[str, Any] | None:
+        metadata = context.metadata if context else {}
+        payload = {
+            "user_request": query,
+            "task_id": context.task_id if context else None,
+            "subject_hint": subject_hint,
+            "body_hint": body_hint,
+            "attachment_names": [path.name for path in attachments],
+            "last_report_path": metadata.get("last_report_path"),
+            "conversation_record": str(metadata.get("conversation_record") or "")[-4000:],
+            "formal_memory": metadata.get("formal_memory") or {},
+            "risk_assessment": metadata.get("risk_assessment") or {},
+        }
+        system_prompt = (
+            "\u4f60\u662f SkyGuard \u707e\u5bb3\u667a\u80fd\u5206\u6790\u5e73\u53f0\u7684\u90ae\u4ef6\u79d8\u4e66\uff0c\u53ea\u8f93\u51fa JSON\u3002"
+            "\u8bf7\u6839\u636e\u7528\u6237\u8bf7\u6c42\u3001\u4efb\u52a1\u4e0a\u4e0b\u6587\u548c\u9644\u4ef6\u751f\u6210\u4e00\u5c01\u6b63\u5f0f\u3001\u7b80\u6d01\u3001\u81ea\u7136\u7684\u4e2d\u6587\u90ae\u4ef6\u8349\u7a3f\u3002"
+            "\u4e0d\u8981\u628a\u7528\u6237\u539f\u8bdd\u76f4\u63a5\u5f53\u6b63\u6587\uff1b\u5982\u679c\u7528\u6237\u660e\u786e\u6307\u5b9a\u4e3b\u9898\u6216\u6b63\u6587\uff0c\u5fc5\u987b\u4f18\u5148\u4fdd\u7559\u3002"
+            "\u6b63\u6587\u5e94\u5305\u542b\u95ee\u5019\u3001\u53d1\u9001\u76ee\u7684\u3001\u9644\u4ef6\u8bf4\u660e\u3001\u67e5\u9605\u5efa\u8bae\u548c\u843d\u6b3e\u3002"
+            "JSON \u5b57\u6bb5\u5fc5\u987b\u4e3a subject \u548c body\u3002"
+        )
+        try:
+            draft = complete_llm_json(
+                system_prompt,
+                json.dumps(payload, ensure_ascii=False, default=str),
+                temperature=0.2,
+                timeout=30,
+            )
+        except Exception:
+            return None
+        subject = str(draft.get("subject") or "").strip()
+        body = str(draft.get("body") or "").strip()
+        if not subject and not body:
+            return None
+        return {"subject": subject, "body": body}
+
+    def _extract_labeled_value(self, query: str, labels: tuple[str, ...]) -> str:
+        text = str(query or "").strip()
+        if not text:
+            return ""
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        stop_labels = "\u90ae\u4ef6\u4e3b\u9898|\u4e3b\u9898|subject|\u90ae\u4ef6\u6b63\u6587|\u6b63\u6587|\u90ae\u4ef6\u5185\u5bb9|\u5185\u5bb9|body|\u90ae\u7bb1|\u6536\u4ef6\u4eba|\u9644\u4ef6"
+        pattern = rf"(?:{label_pattern})\s*(?:\u662f|\u4e3a|:|\uff1a)?\s*(.+?)(?=(?:[,\uff0c\u3002\uff1b;]\s*(?:{stop_labels})\s*(?:\u662f|\u4e3a|:|\uff1a)?)|$)"
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return ""
+        value = match.group(1).strip(" ,\uff0c\u3002\uff1b;\n\t")
+        return EMAIL_PATTERN.sub("", value).strip(" ,\uff0c\u3002\uff1b;\n\t")
+
+    def _fallback_body(self, context: ToolContext | None, attachments: list[Path]) -> str:
+        task_text = f"\u4efb\u52a1 {context.task_id}" if context and context.task_id is not None else "\u76f8\u5173\u4efb\u52a1"
+        attachment_text = "\u3001".join(path.name for path in attachments) or "\u76f8\u5173\u6750\u6599"
+        return (
+            "\u60a8\u597d\uff1a\n\n"
+            f"\u73b0\u5c06 SkyGuard \u5e73\u53f0\u751f\u6210\u7684{task_text}\u707e\u5bb3\u5206\u6790\u6750\u6599\u53d1\u9001\u7ed9\u60a8\uff0c\u8bf7\u67e5\u6536\u9644\u4ef6\uff1a{attachment_text}\u3002\n\n"
+            "\u9644\u4ef6\u5185\u5bb9\u53ef\u7528\u4e8e\u4e86\u89e3\u707e\u5bb3\u4e8b\u4ef6\u6982\u51b5\u3001\u98ce\u9669\u5224\u65ad\u3001\u5f71\u54cd\u8303\u56f4\u53ca\u5904\u7f6e\u5efa\u8bae\u3002\u5982\u9700\u8fdb\u4e00\u6b65\u6838\u67e5\uff0c\u8bf7\u7ed3\u5408\u5f53\u5730\u5b98\u65b9\u9884\u8b66\u3001\u5e94\u6025\u901a\u62a5\u548c\u73b0\u573a\u4fe1\u606f\u8fdb\u884c\u786e\u8ba4\u3002\n\n"
+            "\u6b64\u81f4\n"
+            "SkyGuard \u707e\u5bb3\u667a\u80fd\u5206\u6790\u5e73\u53f0"
+        )
 
     def _missing_smtp_config(self) -> list[str]:
         missing = []

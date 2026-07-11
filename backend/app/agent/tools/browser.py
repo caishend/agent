@@ -346,6 +346,20 @@ class BrowserTool(BaseTool):
 
     def _query_mentions_screenshot(self, query: str) -> bool:
         normalized_query = query.lower()
+        explicit_keywords = (
+            "截图",
+            "截屏",
+            "截一张",
+            "截个图",
+            "帮我截",
+            "网页图",
+            "页面图",
+            "图片",
+            "screenshot",
+            "capture",
+        )
+        if any(keyword in normalized_query for keyword in explicit_keywords):
+            return True
         return any(
             keyword in normalized_query
             for keyword in ("截图", "截屏", "网页图", "页面图", "screenshot", "capture", "鎴浘")

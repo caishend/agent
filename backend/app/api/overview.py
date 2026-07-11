@@ -191,12 +191,26 @@ def _ensure_population_seed(db: Session) -> None:
 
 def _ensure_events_from_tasks(db: Session, user_id: int) -> None:
     tasks = db.query(Task).filter(Task.user_id == user_id).all()
+    changed = False
     for task in tasks:
         exists = db.query(DisasterEvent).filter(DisasterEvent.task_id == task.task_id).first()
-        if exists:
-            continue
-        location_text = task.location or task.task_name or ""
+        location_text = " ".join(
+            part
+            for part in (
+                task.location,
+                task.task_name,
+                exists.location_name if exists else None,
+                exists.event_name if exists else None,
+            )
+            if part
+        )
         location = _match_location(location_text)
+        if exists:
+            if location and (not exists.longitude or not exists.latitude or not exists.province):
+                _apply_location_to_event(exists, location, task.location)
+                exists.confidence = max(float(exists.confidence or 0.0), 0.65)
+                changed = True
+            continue
         disaster_type = task.disaster_type or _infer_disaster_type(task.task_name)
         risk_level = _risk_from_status(task.status)
         db.add(
@@ -218,12 +232,20 @@ def _ensure_events_from_tasks(db: Session, user_id: int) -> None:
                 confidence=0.65 if location else 0.45,
             )
         )
-    db.commit()
+        changed = True
+    if changed:
+        db.commit()
 
 
 def _refresh_population_impact(db: Session, user_id: int) -> None:
     changed = False
     for event in _user_events(db, user_id):
+        if not event.longitude or not event.latitude:
+            location = _match_location(" ".join(part for part in (event.location_name, event.event_name, event.province, event.city) if part))
+            if location:
+                _apply_location_to_event(event, location, event.location_name)
+                event.confidence = max(float(event.confidence or 0.0), 0.65)
+                changed = True
         if event.estimated_affected_population and event.population_density:
             continue
         radius = event.impact_radius_km or RISK_RADIUS.get(event.risk_level or "待评估", 5)
@@ -315,10 +337,28 @@ def _match_population(db: Session, event: DisasterEvent) -> PopulationDensity | 
 
 
 def _match_location(text: str) -> dict[str, Any]:
+    text = str(text or "")
     for city_name, profile in CITY_PROFILE.items():
-        if city_name in text or profile["city"] in text or profile["province"] in text:
+        if any(alias in text for alias in _location_aliases(city_name, profile)):
             return profile
     return {}
+
+
+def _location_aliases(city_name: str, profile: dict[str, Any]) -> list[str]:
+    aliases = {city_name, str(profile.get("city") or ""), str(profile.get("province") or "")}
+    for value in list(aliases):
+        for suffix in ("壮族自治区", "回族自治区", "维吾尔自治区", "自治区", "省", "市"):
+            if value.endswith(suffix) and len(value) > len(suffix):
+                aliases.add(value[: -len(suffix)])
+    return [alias for alias in aliases if alias]
+
+
+def _apply_location_to_event(event: DisasterEvent, location: dict[str, Any], fallback_name: str | None = None) -> None:
+    event.province = location.get("province") or event.province
+    event.city = location.get("city") or event.city
+    event.location_name = fallback_name or location.get("city") or location.get("province") or event.location_name
+    event.longitude = location.get("lng") or event.longitude
+    event.latitude = location.get("lat") or event.latitude
 
 
 def _infer_disaster_type(text: str) -> str:
@@ -655,13 +695,14 @@ def sync_event_from_agent_session(db: Session, task_id: int, metadata: dict[str,
     location_text = " ".join(str(item) for item in locations) or task.location or task.task_name
     location = _match_location(location_text)
     disaster_type = formal_memory.get("disaster_type") or task.disaster_type or _infer_disaster_type(task.task_name)
-    risk_level = assessment.get("risk_level") or _risk_from_status(task.status)
-    risk_score = assessment.get("risk_score") or RISK_SCORE.get(risk_level, 0.4)
-
     event = db.query(DisasterEvent).filter(DisasterEvent.task_id == task_id).first()
     if not event:
         event = DisasterEvent(task_id=task_id, event_name=task.task_name)
         db.add(event)
+
+    fallback_risk_level = event.risk_level or _risk_from_status(task.status)
+    risk_level = assessment.get("risk_level") or fallback_risk_level
+    risk_score = assessment.get("risk_score") or event.severity_score or RISK_SCORE.get(risk_level, 0.4)
 
     event.event_name = _clean_event_display_text(formal_memory.get("title") or task.task_name)
     event.disaster_type = disaster_type or "未知"
@@ -676,7 +717,7 @@ def sync_event_from_agent_session(db: Session, task_id: int, metadata: dict[str,
     event.event_time = task.create_time or event.event_time
     event.summary = _session_summary(task, formal_memory, assessment)
     event.source_type = "agent"
-    event.confidence = 0.82 if assessment else 0.68
+    event.confidence = max(float(event.confidence or 0.0), 0.82 if assessment else 0.68)
     event.report_path = metadata.get("last_report_path") or event.report_path
     db.commit()
 
